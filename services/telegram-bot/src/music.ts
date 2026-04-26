@@ -3,7 +3,7 @@ import path from "node:path";
 import os from "node:os";
 import { spawn } from "node:child_process";
 import ytdl from "@distube/ytdl-core";
-import YouTube from "youtube-sr";
+import { YouTube } from "youtube-sr";
 import type { SearchResult } from "./state.js";
 
 const TMP_DIR = path.join(os.tmpdir(), "arya-music");

@@ -140,18 +140,20 @@ function formatResults(results: SearchResult[], startIdx: number): string {
   const lines = results.map((r, i) => {
     const num = startIdx + i + 1;
     const safeTitle = r.title.length > 64 ? r.title.slice(0, 61) + "..." : r.title;
-    return `*${num}.* ${escapeMd(safeTitle)}\n   _${escapeMd(r.channel)} • ${escapeMd(r.durationFormatted)}_`;
+    return `<b>${num}.</b> ${htmlEscape(safeTitle)}\n   <i>${htmlEscape(r.channel)} • ${htmlEscape(r.durationFormatted)}</i>`;
   });
-  return `🎧 *Top results*\n\n${lines.join("\n\n")}\n\n_Tap a number to play._`;
+  return `🎧 <b>Top results</b>\n\n${lines.join("\n\n")}\n\n<i>Tap a number to play.</i>`;
 }
 
-function escapeMd(s: string): string {
-  return s.replace(/([_*[\]()~`>#+\-=|{}.!\\])/g, "\\$1");
-}
-
-// Strip the markdown helper since we use plain Markdown (not MarkdownV2). Keep simple escaper:
 function softEscape(s: string): string {
   return s.replace(/[_*`[\]]/g, (c) => `\\${c}`);
+}
+
+function htmlEscape(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }
 
 // ----------- /start -----------
@@ -180,17 +182,18 @@ bot.command("viewpacks", async (ctx) => {
   if (!uid) return;
   const u = getUserPacks(uid);
   if (u.packs.length === 0) {
-    await ctx.reply("📦 You don't have any sticker packs yet.\nUse 🧩 *Stickers* to create one!", {
-      parse_mode: "Markdown",
-    });
+    await ctx.reply(
+      "📦 You don't have any sticker packs yet.\nUse 🧩 <b>Stickers</b> to create one!",
+      { parse_mode: "HTML" },
+    );
     return;
   }
   const lines = u.packs.map(
     (p, i) =>
-      `*${i + 1}.* ${softEscape(p.name)}  _( ${p.count} stickers )_\n   ${p.link}`,
+      `<b>${i + 1}.</b> ${htmlEscape(p.name)}  <i>( ${p.count} stickers )</i>\n   <a href="${htmlEscape(p.link)}">${htmlEscape(p.link)}</a>`,
   );
-  await ctx.reply(`📚 *Your Sticker Packs*\n\n${lines.join("\n\n")}`, {
-    parse_mode: "Markdown",
+  await ctx.reply(`📚 <b>Your Sticker Packs</b>\n\n${lines.join("\n\n")}`, {
+    parse_mode: "HTML",
     link_preview_options: { is_disabled: true },
   });
 });
@@ -313,14 +316,17 @@ bot.callbackQuery("stickers:viewpacks", async (ctx) => {
   const uid = ctx.from.id;
   const u = getUserPacks(uid);
   if (u.packs.length === 0) {
-    await ctx.reply("📦 No packs yet — tap *Create Pack* to start one.", { parse_mode: "Markdown" });
+    await ctx.reply("📦 No packs yet — tap <b>Create Pack</b> to start one.", {
+      parse_mode: "HTML",
+    });
     return;
   }
   const lines = u.packs.map(
-    (p, i) => `*${i + 1}.* ${softEscape(p.name)}  _( ${p.count} stickers )_\n   ${p.link}`,
+    (p, i) =>
+      `<b>${i + 1}.</b> ${htmlEscape(p.name)}  <i>( ${p.count} stickers )</i>\n   <a href="${htmlEscape(p.link)}">${htmlEscape(p.link)}</a>`,
   );
-  await ctx.reply(`📚 *Your Sticker Packs*\n\n${lines.join("\n\n")}`, {
-    parse_mode: "Markdown",
+  await ctx.reply(`📚 <b>Your Sticker Packs</b>\n\n${lines.join("\n\n")}`, {
+    parse_mode: "HTML",
     link_preview_options: { is_disabled: true },
   });
 });
@@ -416,7 +422,7 @@ async function renderResultsPage(ctx: Context, uid: number): Promise<void> {
   if (ctx.callbackQuery && ctx.callbackQuery.message) {
     try {
       await ctx.editMessageText(text, {
-        parse_mode: "Markdown",
+        parse_mode: "HTML",
         reply_markup: resultsMenu(pageItems, start, hasMore, hasPrev),
       });
       return;
@@ -425,7 +431,7 @@ async function renderResultsPage(ctx: Context, uid: number): Promise<void> {
     }
   }
   await ctx.reply(text, {
-    parse_mode: "Markdown",
+    parse_mode: "HTML",
     reply_markup: resultsMenu(pageItems, start, hasMore, hasPrev),
   });
 }
@@ -452,8 +458,8 @@ async function deliverAudio(ctx: Context, pick: SearchResult): Promise<void> {
       title: downloaded.title,
       performer: downloaded.artist,
       duration: downloaded.durationSec || undefined,
-      caption: `🎵 *${softEscape(downloaded.title)}*\n👤 ${softEscape(downloaded.artist)}`,
-      parse_mode: "Markdown",
+      caption: `🎵 <b>${htmlEscape(downloaded.title)}</b>\n👤 ${htmlEscape(downloaded.artist)}`,
+      parse_mode: "HTML",
     });
   } catch (err) {
     console.error("[deliver] send failed", err);
@@ -481,8 +487,8 @@ async function handlePackName(ctx: Context, name: string): Promise<void> {
     currentPackShortName: undefined,
   });
   await ctx.reply(
-    `✅ Pack ready: *${softEscape(trimmed)}*\n\nNow send images, videos, or GIFs to convert into stickers 🎨\n_You can send many — I'll add them as fast as possible._`,
-    { parse_mode: "Markdown" },
+    `✅ Pack ready: <b>${htmlEscape(trimmed)}</b>\n\nNow send images, videos, or GIFs to convert into stickers 🎨\n<i>You can send many — I'll add them as fast as possible.</i>`,
+    { parse_mode: "HTML" },
   );
 }
 
@@ -777,10 +783,14 @@ async function handleStickerError(
 async function replyWithStickerLink(ctx: Context, uid: number, shortName: string): Promise<void> {
   const pack = findPack(uid, shortName);
   if (!pack) return;
-  await ctx.reply(
-    `✅ Added to *${softEscape(pack.name)}*  ( ${pack.count} stickers )\n${pack.link}\n\nKeep sending media to add more!`,
-    { parse_mode: "Markdown", link_preview_options: { is_disabled: true } },
-  );
+  const text =
+    `✅ Added to <b>${htmlEscape(pack.name)}</b>  ( ${pack.count} stickers )\n` +
+    `<a href="${htmlEscape(pack.link)}">${htmlEscape(pack.link)}</a>\n\n` +
+    `Keep sending media to add more!`;
+  await ctx.reply(text, {
+    parse_mode: "HTML",
+    link_preview_options: { is_disabled: true },
+  });
 }
 
 // ----------- error handler -----------
