@@ -1,1 +1,1 @@
-{"8438709087":{"mode":"sticker","step":"await_media","data":{},"history":[{"mode":null,"step":"idle"},{"mode":"sticker","step":"menu"}],"lastMenuMessageId":396,"pendingPackName":"Arya","currentPackShortName":"arya_by_Vibeshunter_bot"}}
+{"8438709087":{"mode":"sticker","step":"await_media","data":{},"history":[{"mode":null,"step":"idle"},{"mode":"sticker","step":"menu"},{"mode":"sticker","step":"await_pack_name"}],"lastMenuMessageId":420,"currentPackShortName":"arya_tbn_by_Vibeshunter_bot","pendingPackName":"Arya"}}

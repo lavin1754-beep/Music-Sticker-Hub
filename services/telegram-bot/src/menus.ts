@@ -1,14 +1,14 @@
 import { InlineKeyboard } from "grammy";
 
-export const WELCOME_MESSAGE = `🎧 *Welcome to Arya Music* 🎧
+export const WELCOME_MESSAGE = `🎧 *Welcome to Arya — Music & Stickers*
 
-Your all-in-one companion for *music* and *stickers* — sleek, fast, and crafted with care.
+A little corner where your favourite tunes meet your favourite moments.
+Hum a lyric, name a song, or hand me a photo — I'll turn the thought into something you can share.
 
-✨ *What I can do*
-🎵  Find and deliver any song — old, new, or trending
-🧩  Turn your photos, videos & GIFs into pro-quality stickers
+🎵  *Music* — songs, artists, movies & lyrics, delivered as crisp audio
+🧩  *Stickers* — your pictures, clips & GIFs, polished into pro-quality packs
 
-Pick a vibe to get started 👇`;
+Pick where you'd like to begin 👇`;
 
 export const ARYA_FOOTER = "Arya Music • crafted with 💜";
 

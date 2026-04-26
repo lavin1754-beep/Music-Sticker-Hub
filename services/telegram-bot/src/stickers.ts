@@ -53,13 +53,16 @@ export async function imageToStickerWebp(input: Buffer): Promise<Buffer> {
   const hasAlpha = !!baseMeta.hasAlpha;
 
   // Only attempt to trim transparent borders if the image actually has an alpha
-  // channel — trimming a solid-color photo can chop real content.
+  // channel — trimming a solid-color photo can chop real content. We use a
+  // generous threshold so that semi-transparent halos (very common on PNGs
+  // exported from photo editors) are also removed; this is what kills the
+  // visible "gap" between adjacent stickers in chat.
   let img = sharp(input, { failOn: "none" }).rotate();
   if (hasAlpha) {
     try {
       img = img.trim({
         background: { r: 0, g: 0, b: 0, alpha: 0 },
-        threshold: 5,
+        threshold: 30,
       });
     } catch {
       // some images can't be trimmed; fall back to original.
@@ -114,7 +117,7 @@ export async function videoToStickerWebm(inputPath: string): Promise<Buffer> {
         "-loglevel",
         "error",
         "-t",
-        "2.95",
+        "3.0",
         "-i",
         inputPath,
         "-an",
