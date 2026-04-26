@@ -10,17 +10,22 @@ async function ensureTmp(): Promise<void> {
   await fs.mkdir(TMP_DIR, { recursive: true });
 }
 
-export function makeShortName(rawName: string, botUsername: string): string {
+export function makeShortName(
+  rawName: string,
+  botUsername: string,
+  withRandom = false,
+): string {
   const cleaned = rawName
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "")
     .slice(0, 24) || "pack";
-  const suffix = Math.random().toString(36).slice(2, 6);
   // Telegram requires short_name to end with `_by_<botusername>` and be unique globally.
   // Total length <= 64 chars, ASCII letters/digits/underscores only.
-  const base = `${cleaned}_${suffix}`;
   const tail = `_by_${botUsername}`;
+  const base = withRandom
+    ? `${cleaned}_${Math.random().toString(36).slice(2, 5)}`
+    : cleaned;
   const maxBase = 60 - tail.length;
   return `${base.slice(0, maxBase)}${tail}`;
 }
@@ -42,13 +47,24 @@ async function tmpFile(ext: string): Promise<string> {
  * - Preserves aspect ratio, no cropping of real content
  */
 export async function imageToStickerWebp(input: Buffer): Promise<Buffer> {
-  // Trim transparent / near-transparent borders first so the bounding box is tight.
+  // Read original (auto-orient via EXIF rotate).
+  const probe = sharp(input, { failOn: "none" }).rotate();
+  const baseMeta = await probe.metadata();
+  const hasAlpha = !!baseMeta.hasAlpha;
+
+  // Only attempt to trim transparent borders if the image actually has an alpha
+  // channel — trimming a solid-color photo can chop real content.
   let img = sharp(input, { failOn: "none" }).rotate();
-  // .trim() removes uniform borders (transparent or solid). threshold leaves slight tolerance.
-  try {
-    img = img.trim({ background: { r: 0, g: 0, b: 0, alpha: 0 }, threshold: 10 });
-  } catch {
-    // some images can't be trimmed; ignore
+  if (hasAlpha) {
+    try {
+      img = img.trim({
+        background: { r: 0, g: 0, b: 0, alpha: 0 },
+        threshold: 5,
+      });
+    } catch {
+      // some images can't be trimmed; fall back to original.
+      img = sharp(input, { failOn: "none" }).rotate();
+    }
   }
 
   const meta = await img.metadata();
@@ -70,8 +86,11 @@ export async function imageToStickerWebp(input: Buffer): Promise<Buffer> {
     .resize(targetW, targetH, {
       fit: "fill",
       kernel: "lanczos3",
+      withoutEnlargement: false,
     })
-    .webp({ quality: 95, lossless: false, effort: 4 })
+    // Gentle sharpen to compensate for lanczos softness; keeps detail crisp.
+    .sharpen({ sigma: 0.6, m1: 0.5, m2: 1.5 })
+    .webp({ quality: 100, lossless: false, effort: 6, smartSubsample: true })
     .toBuffer();
 }
 

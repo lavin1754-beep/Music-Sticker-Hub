@@ -145,10 +145,6 @@ function formatResults(results: SearchResult[], startIdx: number): string {
   return `🎧 <b>Top results</b>\n\n${lines.join("\n\n")}\n\n<i>Tap a number to play.</i>`;
 }
 
-function softEscape(s: string): string {
-  return s.replace(/[_*`[\]]/g, (c) => `\\${c}`);
-}
-
 function htmlEscape(s: string): string {
   return s
     .replace(/&/g, "&amp;")
@@ -378,19 +374,11 @@ async function handleMusicQuery(
   const uid = ctx.from.id;
   const wait = await ctx.reply("🔎 Searching…");
 
-  const limit = kind === "lyrics" ? 5 : 30;
-  const results = await searchMusic(query, kind, limit);
+  const results = await searchMusic(query, kind, 30);
   await safeDeleteMessage(ctx, wait.message_id);
 
   if (results.length === 0) {
     await ctx.reply("I couldn't find that 😕 Please check the name and try again.");
-    return;
-  }
-
-  // Lyrics mode: deliver top match directly when confidence is high (single strong result).
-  if (kind === "lyrics") {
-    await ctx.reply(`🎯 Best match for those lyrics:`);
-    await deliverAudio(ctx, results[0]);
     return;
   }
 
@@ -504,17 +492,39 @@ async function downloadFile(ctx: Context, fileId: string): Promise<Buffer> {
   return Buffer.from(await res.arrayBuffer());
 }
 
-async function ensureStaticPack(ctx: Context, uid: number): Promise<string | null> {
+function reuseStaticPack(uid: number): string | null {
   const s = getState(uid);
-  // If we already have a current static pack with room, reuse it.
   if (s.currentPackShortName) {
     const existing = findPack(uid, s.currentPackShortName);
     if (existing && existing.kind === "static" && existing.count < STATIC_PACK_LIMIT) {
       return existing.shortName;
     }
   }
-  // Need to create a new pack — but only after we have the FIRST sticker.
   return null;
+}
+
+function reuseVideoPack(uid: number): string | null {
+  const s = getState(uid);
+  if (s.currentPackShortName) {
+    const existing = findPack(uid, s.currentPackShortName);
+    if (existing && existing.kind === "video" && existing.count < VIDEO_PACK_LIMIT) {
+      return existing.shortName;
+    }
+  }
+  return null;
+}
+
+function isShortNameTakenError(err: unknown): boolean {
+  if (!(err instanceof GrammyError)) return false;
+  const d = err.description || "";
+  return (
+    d.includes("STICKERSET_INVALID") ||
+    d.includes("name is already occupied") ||
+    d.includes("SHORT_NAME_OCCUPIED") ||
+    d.includes("SHORT_NAME_INVALID") ||
+    d.includes("PACK_SHORT_NAME_OCCUPIED") ||
+    d.includes("PACK_SHORT_NAME_INVALID")
+  );
 }
 
 bot.on(["message:photo", "message:document"], async (ctx) => {
@@ -598,29 +608,30 @@ async function processStaticSticker(
     const buf = await downloadFile(ctx, fileId);
     const webp = await imageToStickerWebp(buf);
 
-    const shortName = await ensureOrCreateStaticPack(ctx, uid, pendingName, webp);
-    if (!shortName) return;
-
-    // If the pack already exists, add to it.
-    const pack = findPack(uid, shortName);
-    if (pack && pack.count > 0) {
-      // Pack exists & has stickers → add another.
+    // 1) If we already have an open static pack, just append to it.
+    const existing = reuseStaticPack(uid);
+    if (existing) {
       try {
         const tmp = await writeTempFromBuffer(webp, "webp");
-        await ctx.api.addStickerToSet(uid, shortName, {
+        await ctx.api.addStickerToSet(uid, existing, {
           sticker: new InputFile(tmp),
           format: "static",
           emoji_list: ["✨"],
         });
         await cleanupFile(tmp);
-        incrementPackCount(uid, shortName);
+        incrementPackCount(uid, existing);
+        await replyWithStickerLink(ctx, uid, existing);
+        return;
       } catch (err) {
         await handleStickerError(ctx, uid, err, "static");
         return;
       }
     }
 
-    await replyWithStickerLink(ctx, uid, shortName);
+    // 2) Otherwise create a NEW pack with this sticker as the first one.
+    const created = await createStickerPack(ctx, uid, pendingName, webp, "static");
+    if (!created) return;
+    await replyWithStickerLink(ctx, uid, created);
   } catch (err) {
     console.error("[sticker static] failed", err);
     await ctx.reply("😕 Couldn't convert that one. Try another file.");
@@ -640,27 +651,30 @@ async function processVideoSticker(
     await fs.writeFile(inputPath, buf);
     const webm = await videoToStickerWebm(inputPath);
 
-    const shortName = await ensureOrCreateVideoPack(ctx, uid, pendingName, webm);
-    if (!shortName) return;
-
-    const pack = findPack(uid, shortName);
-    if (pack && pack.count > 0) {
+    // 1) Append to existing video pack if open.
+    const existing = reuseVideoPack(uid);
+    if (existing) {
       try {
         const tmp = await writeTempFromBuffer(webm, "webm");
-        await ctx.api.addStickerToSet(uid, shortName, {
+        await ctx.api.addStickerToSet(uid, existing, {
           sticker: new InputFile(tmp),
           format: "video",
           emoji_list: ["🎬"],
         });
         await cleanupFile(tmp);
-        incrementPackCount(uid, shortName);
+        incrementPackCount(uid, existing);
+        await replyWithStickerLink(ctx, uid, existing);
+        return;
       } catch (err) {
         await handleStickerError(ctx, uid, err, "video");
         return;
       }
     }
 
-    await replyWithStickerLink(ctx, uid, shortName);
+    // 2) Create a new video pack.
+    const created = await createStickerPack(ctx, uid, pendingName, webm, "video");
+    if (!created) return;
+    await replyWithStickerLink(ctx, uid, created);
   } catch (err) {
     console.error("[sticker video] failed", err);
     await ctx.reply("😕 Couldn't convert that video. Try another file.");
@@ -669,92 +683,81 @@ async function processVideoSticker(
   }
 }
 
-async function ensureOrCreateStaticPack(
+async function createStickerPack(
   ctx: Context,
   uid: number,
   pendingName: string,
   firstSticker: Buffer,
+  kind: "static" | "video",
 ): Promise<string | null> {
-  // Reuse current static pack if it has room.
-  const existing = await ensureStaticPack(ctx, uid);
-  if (existing) return existing;
+  // Try a clean name first; on collision, retry a few times with a short random suffix.
+  const ext = kind === "video" ? "webm" : "webp";
+  const format = kind === "video" ? "video" : "static";
+  const emoji = kind === "video" ? "🎬" : "✨";
+  const title = pendingName;
 
-  const shortName = makeShortName(pendingName, botUsername);
-  const tmp = await writeTempFromBuffer(firstSticker, "webp");
+  const candidates = [
+    makeShortName(pendingName, botUsername, false),
+    makeShortName(pendingName, botUsername, true),
+    makeShortName(pendingName, botUsername, true),
+    makeShortName(pendingName, botUsername, true),
+  ];
+
+  const tmp = await writeTempFromBuffer(firstSticker, ext);
+  let lastErr: unknown = null;
+  let chosen: string | null = null;
 
   try {
-    await ctx.api.createNewStickerSet(uid, shortName, pendingName, [
-      {
-        sticker: new InputFile(tmp),
-        format: "static",
-        emoji_list: ["✨"],
-      },
-    ]);
-  } catch (err) {
-    await cleanupFile(tmp);
-    console.error("[pack create static] failed", err);
-    if (err instanceof GrammyError && err.description.includes("STICKERSET_INVALID")) {
-      await ctx.reply("Try a different pack name — that one is taken.");
-    } else {
-      await ctx.reply(`😕 Couldn't create the pack: ${err instanceof Error ? err.message : "unknown"}`);
+    for (const shortName of candidates) {
+      try {
+        await ctx.api.createNewStickerSet(uid, shortName, title, [
+          {
+            sticker: new InputFile(tmp),
+            format,
+            emoji_list: [emoji],
+          },
+        ]);
+        chosen = shortName;
+        break;
+      } catch (err) {
+        lastErr = err;
+        if (isShortNameTakenError(err)) {
+          // Try the next candidate with a random suffix.
+          continue;
+        }
+        // Different error — bail.
+        console.error(`[pack create ${kind}] failed`, err);
+        await ctx.reply(
+          `😕 Couldn't create the pack: ${err instanceof Error ? err.message : "unknown"}`,
+        );
+        return null;
+      }
     }
+  } finally {
+    await cleanupFile(tmp);
+  }
+
+  if (!chosen) {
+    console.error(`[pack create ${kind}] all candidates exhausted`, lastErr);
+    await ctx.reply(
+      "😕 Couldn't create that pack — please try again with a different name.",
+    );
     return null;
   }
-  await cleanupFile(tmp);
 
   addPack(uid, {
-    name: pendingName,
-    shortName,
-    link: packLink(shortName),
-    kind: "static",
+    name: title,
+    shortName: chosen,
+    link: packLink(chosen),
+    kind,
     count: 1,
     createdAt: Date.now(),
   });
-  setCurrentPack(uid, shortName);
-  return shortName;
-}
-
-async function ensureOrCreateVideoPack(
-  ctx: Context,
-  uid: number,
-  pendingName: string,
-  firstSticker: Buffer,
-): Promise<string | null> {
-  const s = getState(uid);
-  if (s.currentPackShortName) {
-    const existing = findPack(uid, s.currentPackShortName);
-    if (existing && existing.kind === "video" && existing.count < VIDEO_PACK_LIMIT) {
-      return existing.shortName;
-    }
-  }
-  const shortName = makeShortName(`${pendingName}_video`, botUsername);
-  const tmp = await writeTempFromBuffer(firstSticker, "webm");
-  try {
-    await ctx.api.createNewStickerSet(uid, shortName, `${pendingName} (Video)`, [
-      {
-        sticker: new InputFile(tmp),
-        format: "video",
-        emoji_list: ["🎬"],
-      },
-    ]);
-  } catch (err) {
-    await cleanupFile(tmp);
-    console.error("[pack create video] failed", err);
-    await ctx.reply(`😕 Couldn't create the video pack: ${err instanceof Error ? err.message : "unknown"}`);
-    return null;
-  }
-  await cleanupFile(tmp);
-
-  addPack(uid, {
-    name: `${pendingName} (Video)`,
-    shortName,
-    link: packLink(shortName),
-    kind: "video",
-    count: 1,
-    createdAt: Date.now(),
-  });
-  setCurrentPack(uid, shortName);
-  return shortName;
+  setCurrentPack(uid, chosen);
+  // CRITICAL: also persist into the user's *state* so subsequent media re-use
+  // this pack instead of creating a new one each time.
+  setState(uid, { currentPackShortName: chosen });
+  return chosen;
 }
 
 async function handleStickerError(
@@ -774,6 +777,7 @@ async function handleStickerError(
         reply_markup: packFullMenu(),
       });
       setCurrentPack(uid, undefined);
+      setState(uid, { currentPackShortName: undefined });
       return;
     }
   }

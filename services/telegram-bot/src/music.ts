@@ -2,7 +2,6 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { spawn } from "node:child_process";
-import ytdl from "@distube/ytdl-core";
 import { YouTube } from "youtube-sr";
 import type { SearchResult } from "./state.js";
 
@@ -26,16 +25,16 @@ export async function searchMusic(
 
   switch (kind) {
     case "song":
-      q = `${q} song audio`;
+      q = `${q} audio`;
       break;
     case "artist":
       q = `${q} top songs`;
       break;
     case "movie":
-      q = `${q} movie songs`;
+      q = `${q} movie songs jukebox`;
       break;
     case "lyrics":
-      q = `${q} lyrics song`;
+      // For lyrics search, don't add fluff — match the user's quoted line directly.
       break;
   }
 
@@ -64,70 +63,116 @@ export interface DownloadedAudio {
   webUrl: string;
 }
 
+interface YtDlpJson {
+  title?: string;
+  uploader?: string;
+  artist?: string;
+  creator?: string;
+  channel?: string;
+  duration?: number;
+  thumbnail?: string;
+  webpage_url?: string;
+  track?: string;
+}
+
+function runYtDlpJson(url: string): Promise<YtDlpJson> {
+  return new Promise((resolve, reject) => {
+    const args = [
+      "--dump-single-json",
+      "--no-warnings",
+      "--no-playlist",
+      "--socket-timeout",
+      "20",
+      "--retries",
+      "3",
+      url,
+    ];
+    const child = spawn("yt-dlp", args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (c) => (stdout += c.toString()));
+    child.stderr.on("data", (c) => (stderr += c.toString()));
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code !== 0) {
+        return reject(new Error(`yt-dlp info failed (${code}): ${stderr.trim().slice(0, 300)}`));
+      }
+      try {
+        resolve(JSON.parse(stdout) as YtDlpJson);
+      } catch (e) {
+        reject(new Error(`yt-dlp json parse failed: ${(e as Error).message}`));
+      }
+    });
+  });
+}
+
+function runYtDlpDownload(url: string, outPath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    // Extract bestaudio, transcode to MP3 192k via ffmpeg (which yt-dlp orchestrates).
+    const args = [
+      "--no-warnings",
+      "--no-playlist",
+      "--no-progress",
+      "--socket-timeout",
+      "30",
+      "--retries",
+      "3",
+      "--fragment-retries",
+      "3",
+      "-f",
+      "bestaudio/best",
+      "--extract-audio",
+      "--audio-format",
+      "mp3",
+      "--audio-quality",
+      "0",
+      "-o",
+      outPath,
+      url,
+    ];
+    const child = spawn("yt-dlp", args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stderr = "";
+    child.stderr.on("data", (c) => (stderr += c.toString()));
+    child.stdout.on("data", () => undefined);
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`yt-dlp download failed (${code}): ${stderr.trim().slice(0, 300)}`));
+    });
+  });
+}
+
 export async function downloadAsMp3(url: string): Promise<DownloadedAudio> {
   await ensureTmp();
   const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  const outPath = path.join(TMP_DIR, `${id}.mp3`);
+  // yt-dlp will write to <id>.mp3 because we set audio-format mp3 and -o ends with placeholder.
+  const outTemplate = path.join(TMP_DIR, `${id}.%(ext)s`);
+  const finalPath = path.join(TMP_DIR, `${id}.mp3`);
 
-  const info = await ytdl.getInfo(url);
-  const details = info.videoDetails;
-  const title = details.title;
-  const artist = details.author?.name || details.media?.artist || "Unknown";
-  const durationSec = parseInt(details.lengthSeconds, 10) || 0;
-  const thumbUrl =
-    details.thumbnails?.sort((a, b) => (b.width || 0) - (a.width || 0))[0]?.url;
+  const [info] = await Promise.all([
+    runYtDlpJson(url),
+    runYtDlpDownload(url, outTemplate),
+  ]);
 
-  const audioFormat = ytdl.chooseFormat(info.formats, {
-    quality: "highestaudio",
-    filter: "audioonly",
-  });
-
-  if (!audioFormat) {
-    throw new Error("No audio format available");
+  // Verify the mp3 exists.
+  try {
+    await fs.access(finalPath);
+  } catch {
+    throw new Error("download completed but mp3 not found");
   }
 
-  await new Promise<void>((resolve, reject) => {
-    const stream = ytdl.downloadFromInfo(info, { format: audioFormat });
-    const ff = spawn(
-      "ffmpeg",
-      [
-        "-y",
-        "-loglevel",
-        "error",
-        "-i",
-        "pipe:0",
-        "-vn",
-        "-codec:a",
-        "libmp3lame",
-        "-q:a",
-        "2",
-        "-metadata",
-        `title=${title}`,
-        "-metadata",
-        `artist=${artist}`,
-        outPath,
-      ],
-      { stdio: ["pipe", "inherit", "inherit"] },
-    );
-
-    stream.on("error", (e) => {
-      reject(e);
-    });
-    ff.on("error", reject);
-    ff.on("close", (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`ffmpeg exited with ${code}`));
-    });
-    stream.pipe(ff.stdin);
-  });
+  const title = info.track || info.title || "Unknown";
+  const artist =
+    info.artist || info.creator || info.uploader || info.channel || "Unknown";
+  const durationSec = Math.round(info.duration || 0);
 
   return {
-    filePath: outPath,
+    filePath: finalPath,
     title,
     artist,
     durationSec,
-    thumbUrl,
-    webUrl: url,
+    thumbUrl: info.thumbnail,
+    webUrl: info.webpage_url || url,
   };
 }
 
