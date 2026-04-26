@@ -88,9 +88,9 @@ export async function imageToStickerWebp(input: Buffer): Promise<Buffer> {
       kernel: "lanczos3",
       withoutEnlargement: false,
     })
-    // Gentle sharpen to compensate for lanczos softness; keeps detail crisp.
-    .sharpen({ sigma: 0.6, m1: 0.5, m2: 1.5 })
-    .webp({ quality: 100, lossless: false, effort: 6, smartSubsample: true })
+    // Very mild sharpen to restore crispness lost in resize, without halos.
+    .sharpen({ sigma: 0.4 })
+    .webp({ quality: 92, lossless: false, effort: 4, smartSubsample: true })
     .toBuffer();
 }
 
@@ -125,12 +125,18 @@ export async function videoToStickerWebm(inputPath: string): Promise<Buffer> {
         "-vf",
         vf,
         "-b:v",
-        "256k",
+        "320k",
         "-crf",
-        "32",
+        "30",
         "-deadline",
-        "good",
+        "realtime",
         "-cpu-used",
+        "8",
+        "-row-mt",
+        "1",
+        "-tile-columns",
+        "2",
+        "-threads",
         "4",
         "-auto-alt-ref",
         "0",

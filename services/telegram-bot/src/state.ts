@@ -8,6 +8,7 @@ const PACKS_FILE = path.join(DATA_DIR, "packs.json");
 export type Mode = "music" | "sticker" | null;
 
 export interface SearchResult {
+  videoId: string;
   title: string;
   url: string;
   channel: string;

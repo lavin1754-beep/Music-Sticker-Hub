@@ -43,6 +43,7 @@ export async function searchMusic(
     return videos
       .filter((v) => v.id && v.title)
       .map((v) => ({
+        videoId: v.id as string,
         title: v.title || "Unknown",
         url: `https://www.youtube.com/watch?v=${v.id}`,
         channel: v.channel?.name || "Unknown",

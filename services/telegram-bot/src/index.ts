@@ -103,13 +103,23 @@ async function showMusicMenu(ctx: Context, userId: number): Promise<void> {
 async function showStickersMenu(ctx: Context, userId: number): Promise<void> {
   pushHistory(userId);
   setState(userId, { mode: "sticker", step: "menu", data: {} });
+  // Show "add to current pack" if there's an open one with room.
+  const s = getState(userId);
+  let currentPackName: string | undefined;
+  if (s.currentPackShortName) {
+    const pack = findPack(userId, s.currentPackShortName);
+    if (pack) {
+      const limit = pack.kind === "video" ? VIDEO_PACK_LIMIT : STATIC_PACK_LIMIT;
+      if (pack.count < limit) currentPackName = pack.name;
+    }
+  }
   const text =
     "🧩 *Sticker Studio*\n\nTurn anything into a high-quality sticker pack.\nPick an option to begin:";
   if (ctx.callbackQuery && ctx.callbackQuery.message) {
     try {
       await ctx.editMessageText(text, {
         parse_mode: "Markdown",
-        reply_markup: stickersStartMenu(),
+        reply_markup: stickersStartMenu(currentPackName),
       });
       return;
     } catch {
@@ -118,7 +128,7 @@ async function showStickersMenu(ctx: Context, userId: number): Promise<void> {
   }
   const msg = await ctx.reply(text, {
     parse_mode: "Markdown",
-    reply_markup: stickersStartMenu(),
+    reply_markup: stickersStartMenu(currentPackName),
   });
   setState(userId, { lastMenuMessageId: msg.message_id });
 }
@@ -222,6 +232,12 @@ bot.callbackQuery("back", async (ctx) => {
   else await showHome(ctx, uid);
 });
 
+bot.callbackQuery("home", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const uid = ctx.from.id;
+  await showHome(ctx, uid);
+});
+
 // music option selection
 bot.callbackQuery(/^music:opt:(song|artist|movie|lyrics|audio)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
@@ -280,20 +296,34 @@ bot.callbackQuery("music:prev", async (ctx) => {
   await renderResultsPage(ctx, uid);
 });
 
-bot.callbackQuery(/^music:pick:(\d+)$/, async (ctx) => {
-  const idxOnPage = parseInt(ctx.match[1], 10);
+// New: pick by direct videoId. Old positional `music:pick:N` callbacks (from
+// pre-restart messages) are handled below as a fallback that warns the user.
+bot.callbackQuery(/^music:p:([\w-]{6,32})$/, async (ctx) => {
+  const videoId = ctx.match[1];
   const uid = ctx.from.id;
   const s = getState(uid);
   const all = s.searchResults || [];
-  const page = s.searchPage ?? 0;
-  const start = page * RESULTS_PER_PAGE;
-  const pick = all[start + idxOnPage];
+  // Try to find the rich SearchResult entry first (gives us nice title/channel).
+  let pick = all.find((r) => r.videoId === videoId);
   if (!pick) {
-    await ctx.answerCallbackQuery({ text: "Result expired, search again", show_alert: true });
-    return;
+    // Old result message after a restart — synthesize a minimal pick.
+    pick = {
+      videoId,
+      title: "Selected track",
+      url: `https://www.youtube.com/watch?v=${videoId}`,
+      channel: "YouTube",
+      durationFormatted: "?",
+    };
   }
   await ctx.answerCallbackQuery({ text: "🎧 Fetching audio…" });
   await deliverAudio(ctx, pick);
+});
+
+bot.callbackQuery(/^music:pick:(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery({
+    text: "This result is from an old search — please run a new search.",
+    show_alert: true,
+  });
 });
 
 // stickers
@@ -301,10 +331,43 @@ bot.callbackQuery("stickers:newpack", async (ctx) => {
   await ctx.answerCallbackQuery();
   const uid = ctx.from.id;
   pushHistory(uid);
-  setState(uid, { mode: "sticker", step: "await_pack_name" });
+  // Starting a new pack — reset any "currently open" pack so a new one is created.
+  setState(uid, {
+    mode: "sticker",
+    step: "await_pack_name",
+    currentPackShortName: undefined,
+    pendingPackName: undefined,
+  });
   await ctx.reply("✨ *Send your sticker pack name*\n\nGive it a name you'll remember.", {
     parse_mode: "Markdown",
   });
+});
+
+bot.callbackQuery("stickers:continue", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const uid = ctx.from.id;
+  const s = getState(uid);
+  if (!s.currentPackShortName) {
+    await ctx.reply("No open pack — tap ✨ Start New Pack to begin.");
+    return;
+  }
+  const pack = findPack(uid, s.currentPackShortName);
+  if (!pack) {
+    setState(uid, { currentPackShortName: undefined });
+    await ctx.reply("That pack is gone — tap ✨ Start New Pack to begin.");
+    return;
+  }
+  pushHistory(uid);
+  setState(uid, {
+    mode: "sticker",
+    step: "await_media",
+    pendingPackName: pack.name,
+  });
+  await ctx.reply(
+    `🎨 Continuing <b>${htmlEscape(pack.name)}</b> ( ${pack.count} stickers so far ).\n` +
+      `Send images, videos, or GIFs and I'll add them to this pack.`,
+    { parse_mode: "HTML" },
+  );
 });
 
 bot.callbackQuery("stickers:viewpacks", async (ctx) => {
