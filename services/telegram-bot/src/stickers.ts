@@ -174,4 +174,4 @@ export async function cleanupFile(p: string): Promise<void> {
 }
 
 export const STATIC_PACK_LIMIT = 120;
-export const VIDEO_PACK_LIMIT = 50;
+export const VIDEO_PACK_LIMIT = 120;
