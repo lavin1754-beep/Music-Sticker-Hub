@@ -1,0 +1,11 @@
+node_modules
+**/node_modules
+.git
+.replit
+replit.nix
+attached_assets
+artifacts/mockup-sandbox
+artifacts/api-server/dist
+services/telegram-bot/data
+*.log
+.DS_Store
