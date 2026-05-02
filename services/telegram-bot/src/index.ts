@@ -1,5 +1,6 @@
 import { Bot, InputFile, GrammyError, HttpError } from "grammy";
 import type { Context } from "grammy";
+import { run, sequentialize } from "@grammyjs/runner";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -56,6 +57,10 @@ const AUDIO_RECOGNITION_ENABLED = false;
 const RESULTS_PER_PAGE = 10;
 
 const bot = new Bot(TOKEN);
+
+// Process each user's messages sequentially (no state races),
+// but different users are handled fully concurrently.
+bot.use(sequentialize((ctx) => ctx.from?.id.toString() ?? ""));
 
 let botUsername = "";
 
@@ -878,27 +883,23 @@ async function main(): Promise<void> {
   const me = await bot.api.getMe();
   botUsername = me.username;
   console.log(`[bot] starting as @${botUsername}`);
-  // Drop pending updates from previous runs to avoid stale state.
-  await bot.start({
-    drop_pending_updates: true,
-    onStart: () => console.log("[bot] polling started"),
-  });
-}
 
-let shuttingDown = false;
-async function shutdown(): Promise<void> {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  console.log("[bot] shutting down…");
-  try {
-    await bot.stop();
-  } catch {
-    /* ignore */
+  // Drop stale updates from previous runs.
+  await bot.api.deleteWebhook({ drop_pending_updates: true });
+
+  // run() processes updates from different users CONCURRENTLY.
+  // sequentialize (registered above) ensures same-user updates stay in order.
+  const handle = run(bot);
+  console.log("[bot] polling started (concurrent mode)");
+
+  async function shutdown(): Promise<void> {
+    console.log("[bot] shutting down…");
+    await handle.stop();
+    process.exit(0);
   }
-  process.exit(0);
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
 }
-process.once("SIGINT", shutdown);
-process.once("SIGTERM", shutdown);
 
 main().catch((err) => {
   console.error("[bot] fatal", err);

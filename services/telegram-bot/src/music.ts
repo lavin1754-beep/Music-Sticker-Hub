@@ -87,12 +87,9 @@ export interface DownloadedAudio {
   webUrl: string;
 }
 
-// ─── JioSaavn download (PRIMARY — works on all cloud servers) ─────────────────
-// JioSaavn is a licensed music streaming service with a public API.
-// It doesn't block cloud IPs and requires no authentication.
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
-// Strip YouTube-style suffixes to get a clean song name for JioSaavn search.
-function cleanTitle(t: string): string {
+function stripYtSuffix(t: string): string {
   return t
     .replace(/\(official\s*(music\s*)?video\)/gi, "")
     .replace(/\(official\s*audio\)/gi, "")
@@ -105,6 +102,28 @@ function cleanTitle(t: string): string {
     .trim();
 }
 
+function spawnPromise(
+  cmd: string,
+  args: string[],
+  captureStdout = false,
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    let err = "";
+    if (captureStdout) child.stdout.on("data", (c: Buffer) => (out += c));
+    child.stderr.on("data", (c: Buffer) => (err += c));
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve(out);
+      else reject(new Error(`${cmd} exited ${code}: ${err.slice(0, 200)}`));
+    });
+  });
+}
+
+// ─── Source 1: JioSaavn CDN ───────────────────────────────────────────────────
+// Licensed music CDN — no IP blocking, no auth, works on any cloud server.
+
 interface SaavnSong {
   name?: string;
   duration?: number;
@@ -113,31 +132,30 @@ interface SaavnSong {
   downloadUrl?: Array<{ url: string; quality: string }>;
 }
 
-async function downloadFromSaavn(
+async function tryJioSaavn(
   titleHint: string,
   artistHint: string,
   outPath: string,
 ): Promise<{ title: string; artist: string; durationSec: number; thumbUrl?: string } | null> {
-  const q = encodeURIComponent(`${cleanTitle(titleHint)} ${artistHint}`.trim());
-  let data: { data?: { results?: SaavnSong[] } };
+  const q = encodeURIComponent(`${stripYtSuffix(titleHint)} ${artistHint}`.trim());
+  let songs: SaavnSong[] = [];
+
   try {
     const resp = await fetch(`https://saavn.dev/api/search/songs?query=${q}&limit=5`, {
-      signal: AbortSignal.timeout(10000),
-      headers: { "User-Agent": "Mozilla/5.0", "Accept": "application/json" },
+      signal: AbortSignal.timeout(10_000),
+      headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
     });
-    if (!resp.ok) throw new Error(`saavn.dev HTTP ${resp.status}`);
-    data = await resp.json() as typeof data;
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = (await resp.json()) as { data?: { results?: SaavnSong[] } };
+    songs = data.data?.results ?? [];
   } catch (err) {
-    console.error("[music] saavn.dev unreachable:", (err as Error).message);
+    console.error("[music] saavn.dev fetch failed:", (err as Error).message);
     return null;
   }
 
-  const songs = data.data?.results ?? [];
   if (!songs.length) return null;
-
   const song = songs[0];
   const urls = song.downloadUrl ?? [];
-  // Prefer 320kbps → 160kbps → 96kbps → whatever is available
   const best =
     urls.find((u) => u.quality === "320kbps") ??
     urls.find((u) => u.quality === "160kbps") ??
@@ -146,112 +164,120 @@ async function downloadFromSaavn(
 
   if (!best?.url) return null;
 
-  // Convert M4A/AAC stream to MP3 via ffmpeg
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn("ffmpeg", [
+  try {
+    await spawnPromise("ffmpeg", [
       "-y", "-loglevel", "error",
       "-i", best.url,
       "-vn", "-ar", "44100", "-ac", "2", "-b:a", "128k",
       outPath,
-    ], { stdio: ["ignore", "pipe", "pipe"] });
-    let err = "";
-    child.stderr.on("data", (c) => (err += c));
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`ffmpeg saavn: ${err.slice(0, 150)}`));
-    });
-  });
+    ]);
+  } catch (err) {
+    console.error("[music] ffmpeg/saavn failed:", (err as Error).message);
+    return null;
+  }
 
   return {
     title: song.name || titleHint,
     artist: song.artists?.primary?.[0]?.name || artistHint,
     durationSec: Number(song.duration) || 0,
-    thumbUrl: song.image?.find((i) => i.quality === "500x500")?.url ?? song.image?.[0]?.url,
+    thumbUrl:
+      song.image?.find((i) => i.quality === "500x500")?.url ?? song.image?.[0]?.url,
   };
 }
 
-// ─── yt-dlp download (FALLBACK — works where not IP-blocked) ─────────────────
-function buildArgs(client: string, withCookies: boolean): string[] {
-  const base = [
+// ─── Source 2: SoundCloud via yt-dlp ─────────────────────────────────────────
+// SoundCloud does NOT block cloud server IPs. yt-dlp's `scsearch1:` prefix
+// searches SoundCloud and downloads the first match directly.
+
+async function trySoundCloud(
+  titleHint: string,
+  artistHint: string,
+  outPath: string,
+): Promise<{ title: string; artist: string; durationSec: number } | null> {
+  const query = `${stripYtSuffix(titleHint)} ${artistHint}`.trim();
+  const searchStr = `scsearch1:${query}`;
+
+  // Fetch metadata first
+  let infoJson: Record<string, unknown>;
+  try {
+    const raw = await spawnPromise("yt-dlp", [
+      "--dump-single-json", "--no-warnings", "--no-playlist",
+      "--socket-timeout", "15", "--retries", "1",
+      searchStr,
+    ], true);
+    // yt-dlp scsearch returns a playlist wrapper — grab first entry
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const entries = parsed.entries as Record<string, unknown>[] | undefined;
+    infoJson = entries?.[0] ?? parsed;
+  } catch (err) {
+    console.error("[music] SoundCloud info failed:", (err as Error).message);
+    return null;
+  }
+
+  const scUrl = String(infoJson.webpage_url || "");
+  if (!scUrl) return null;
+
+  // Download as MP3
+  try {
+    await spawnPromise("yt-dlp", [
+      "--no-warnings", "--no-playlist", "--no-progress",
+      "--socket-timeout", "15", "--retries", "1",
+      "-f", "bestaudio/best",
+      "--extract-audio", "--audio-format", "mp3", "--audio-quality", "5",
+      "-o", outPath,
+      scUrl,
+    ]);
+    await fs.access(outPath);
+  } catch (err) {
+    console.error("[music] SoundCloud download failed:", (err as Error).message);
+    return null;
+  }
+
+  return {
+    title: String(infoJson.title || titleHint),
+    artist: String(infoJson.uploader || artistHint),
+    durationSec: Math.round(Number(infoJson.duration) || 0),
+  };
+}
+
+// ─── Source 3: YouTube via yt-dlp ────────────────────────────────────────────
+// Works on Replit / home servers. On Railway, blocked by YouTube unless
+// cookies are provided via YOUTUBE_COOKIES env var.
+
+function ytArgs(client: string): string[] {
+  const args = [
     "--extractor-args", `youtube:player_client=${client}`,
     "--force-ipv4", "--socket-timeout", "15", "--retries", "1",
   ];
-  if (withCookies) base.push("--cookies", COOKIES_FILE);
-  return base;
+  if (cookiesReady) args.push("--cookies", COOKIES_FILE);
+  return args;
 }
 
-function ytDlpJson(url: string, client: string): Promise<Record<string, unknown>> {
-  return new Promise((resolve, reject) => {
-    const child = spawn("yt-dlp", [
-      "--dump-single-json", "--no-warnings", "--no-playlist",
-      ...buildArgs(client, cookiesReady), url,
-    ], { stdio: ["ignore", "pipe", "pipe"] });
-    let out = "", err = "";
-    child.stdout.on("data", (c) => (out += c));
-    child.stderr.on("data", (c) => (err += c));
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code !== 0) return reject(new Error(`yt-dlp(${client}): ${err.slice(0, 150)}`));
-      try { resolve(JSON.parse(out)); } catch (e) { reject(e); }
-    });
-  });
-}
-
-function ytDlpDownload(url: string, out: string, client: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const child = spawn("yt-dlp", [
-      "--no-warnings", "--no-playlist", "--no-progress",
-      ...buildArgs(client, cookiesReady),
-      "--fragment-retries", "1",
-      "-f", "bestaudio[abr<=128]/bestaudio/best",
-      "--extract-audio", "--audio-format", "mp3", "--audio-quality", "5",
-      "-o", out, url,
-    ], { stdio: ["ignore", "pipe", "pipe"] });
-    let err = "";
-    child.stderr.on("data", (c) => (err += c));
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`yt-dlp dl(${client}): ${err.slice(0, 150)}`));
-    });
-  });
-}
-
-// ─── Main orchestrator ────────────────────────────────────────────────────────
-export async function downloadAsMp3(
+async function tryYouTube(
   url: string,
-  titleHint = "",
-  artistHint = "",
-): Promise<DownloadedAudio> {
-  await ensureTmp();
-  const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  const outTemplate = path.join(TMP_DIR, `${id}.%(ext)s`);
-  const finalPath = path.join(TMP_DIR, `${id}.mp3`);
-
-  // ── 1. JioSaavn CDN (works on any cloud server, no IP blocks) ──
-  if (titleHint) {
+  outTemplate: string,
+  finalPath: string,
+  titleHint: string,
+  artistHint: string,
+): Promise<DownloadedAudio | null> {
+  for (const client of ["ios", "android", "mweb"] as const) {
     try {
-      const meta = await downloadFromSaavn(titleHint, artistHint, finalPath);
-      if (meta) {
-        await fs.access(finalPath);
-        console.log("[music] downloaded via JioSaavn");
-        return { filePath: finalPath, webUrl: url, ...meta };
-      }
-    } catch (err) {
-      console.error("[music] JioSaavn failed:", (err as Error).message);
-    }
-  }
-
-  // ── 2. yt-dlp (works on Replit, home servers; may be blocked on cloud) ──
-  const clients = ["ios", "android", "mweb"] as const;
-  for (const client of clients) {
-    try {
-      const [info] = await Promise.all([
-        ytDlpJson(url, client),
-        ytDlpDownload(url, outTemplate, client),
+      const [rawInfo] = await Promise.all([
+        spawnPromise("yt-dlp", [
+          "--dump-single-json", "--no-warnings", "--no-playlist",
+          ...ytArgs(client), url,
+        ], true),
+        spawnPromise("yt-dlp", [
+          "--no-warnings", "--no-playlist", "--no-progress",
+          ...ytArgs(client),
+          "--fragment-retries", "1",
+          "-f", "bestaudio[abr<=128]/bestaudio/best",
+          "--extract-audio", "--audio-format", "mp3", "--audio-quality", "5",
+          "-o", outTemplate, url,
+        ]),
       ]);
       await fs.access(finalPath);
+      const info = JSON.parse(rawInfo) as Record<string, unknown>;
       console.log(`[music] downloaded via yt-dlp client=${client}`);
       return {
         filePath: finalPath,
@@ -265,8 +291,56 @@ export async function downloadAsMp3(
       console.error(`[music] yt-dlp(${client}) failed:`, (err as Error).message);
     }
   }
+  return null;
+}
 
-  throw new Error("Music download failed — all sources unavailable");
+// ─── Main entry ───────────────────────────────────────────────────────────────
+
+export async function downloadAsMp3(
+  url: string,
+  titleHint = "",
+  artistHint = "",
+): Promise<DownloadedAudio> {
+  await ensureTmp();
+  const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const outTemplate = path.join(TMP_DIR, `${id}.%(ext)s`);
+  const finalPath = path.join(TMP_DIR, `${id}.mp3`);
+
+  // ── 1. JioSaavn CDN (fastest, works on all cloud servers) ──
+  if (titleHint) {
+    try {
+      const meta = await tryJioSaavn(titleHint, artistHint, finalPath);
+      if (meta) {
+        await fs.access(finalPath);
+        console.log("[music] downloaded via JioSaavn");
+        return { filePath: finalPath, webUrl: url, ...meta };
+      }
+    } catch (err) {
+      console.error("[music] JioSaavn error:", (err as Error).message);
+    }
+  }
+
+  // ── 2. SoundCloud via yt-dlp (cloud-friendly, no IP blocks) ──
+  if (titleHint) {
+    try {
+      const meta = await trySoundCloud(titleHint, artistHint, finalPath);
+      if (meta) {
+        console.log("[music] downloaded via SoundCloud");
+        return { filePath: finalPath, webUrl: url, ...meta };
+      }
+    } catch (err) {
+      console.error("[music] SoundCloud error:", (err as Error).message);
+    }
+  }
+
+  // ── 3. YouTube via yt-dlp (works locally / with cookies) ──
+  const result = await tryYouTube(url, outTemplate, finalPath, titleHint, artistHint);
+  if (result) return result;
+
+  throw new Error(
+    "Music download failed — YouTube is blocking this server's IP.\n" +
+    "Fix: add YOUTUBE_COOKIES to Railway environment variables.",
+  );
 }
 
 export async function cleanupTempFile(filePath: string): Promise<void> {
