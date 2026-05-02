@@ -30,6 +30,7 @@ import {
   searchMusic,
   downloadAsMp3,
   cleanupTempFile,
+  initCookies,
 } from "./music.js";
 import {
   imageToStickerWebp,
@@ -493,7 +494,7 @@ async function deliverAudio(ctx: Context, pick: SearchResult): Promise<void> {
   const status = await ctx.reply("⬇️ Fetching audio… this takes ~5s");
   let downloaded;
   try {
-    downloaded = await downloadAsMp3(pick.url);
+    downloaded = await downloadAsMp3(pick.url, pick.title, pick.channel);
   } catch (err) {
     console.error("[deliver] download failed", err);
     await safeDeleteMessage(ctx, status.message_id);
@@ -873,6 +874,7 @@ bot.catch((err) => {
 
 async function main(): Promise<void> {
   await loadStore();
+  await initCookies();
   const me = await bot.api.getMe();
   botUsername = me.username;
   console.log(`[bot] starting as @${botUsername}`);
