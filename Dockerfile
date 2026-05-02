@@ -14,12 +14,9 @@ RUN corepack enable && corepack prepare pnpm@9 --activate
 
 WORKDIR /app
 
-COPY package.json pnpm-workspace.yaml pnpm-lock.yaml* ./
-COPY services/telegram-bot/package.json ./services/telegram-bot/
-
-RUN pnpm install --filter @workspace/telegram-bot... --prod=false || pnpm install
-
 COPY . .
+
+RUN pnpm install --filter @workspace/telegram-bot --no-frozen-lockfile
 
 RUN mkdir -p services/telegram-bot/data
 

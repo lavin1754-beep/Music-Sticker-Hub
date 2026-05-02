@@ -76,16 +76,23 @@ interface YtDlpJson {
   track?: string;
 }
 
+// Use the iOS player client — bypasses YouTube's IP-based blocks on cloud
+// servers (Railway, AWS, GCP, etc.) which block the default web client.
+const YT_EXTRACTOR_ARGS = "youtube:player_client=ios";
+
 function runYtDlpJson(url: string): Promise<YtDlpJson> {
   return new Promise((resolve, reject) => {
     const args = [
       "--dump-single-json",
       "--no-warnings",
       "--no-playlist",
+      "--extractor-args",
+      YT_EXTRACTOR_ARGS,
+      "--force-ipv4",
       "--socket-timeout",
-      "20",
+      "15",
       "--retries",
-      "3",
+      "2",
       url,
     ];
     const child = spawn("yt-dlp", args, { stdio: ["ignore", "pipe", "pipe"] });
@@ -109,17 +116,21 @@ function runYtDlpJson(url: string): Promise<YtDlpJson> {
 
 function runYtDlpDownload(url: string, outPath: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    // Extract bestaudio, transcode to MP3 192k via ffmpeg (which yt-dlp orchestrates).
+    // Extract bestaudio, transcode to MP3 via ffmpeg.
+    // iOS player client bypasses YouTube IP blocks on cloud servers.
     const args = [
       "--no-warnings",
       "--no-playlist",
       "--no-progress",
+      "--extractor-args",
+      YT_EXTRACTOR_ARGS,
+      "--force-ipv4",
       "--socket-timeout",
-      "30",
+      "20",
       "--retries",
-      "3",
+      "2",
       "--fragment-retries",
-      "3",
+      "2",
       "-f",
       "bestaudio/best",
       "--extract-audio",
