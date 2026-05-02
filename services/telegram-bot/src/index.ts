@@ -501,10 +501,13 @@ async function deliverAudio(ctx: Context, pick: SearchResult): Promise<void> {
   try {
     downloaded = await downloadAsMp3(pick.url, pick.title, pick.channel);
   } catch (err) {
-    console.error("[deliver] download failed", err);
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[deliver] download failed:", msg);
     await safeDeleteMessage(ctx, status.message_id);
     await ctx.reply(
-      "😕 I couldn't fetch that one. Try another result or a different search.",
+      "😕 Couldn't download that song.\n\n" +
+      "<i>Trying a different result from the same search often works!</i>",
+      { parse_mode: "HTML" },
     );
     return;
   }
