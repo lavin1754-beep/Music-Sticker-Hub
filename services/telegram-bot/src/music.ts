@@ -15,27 +15,19 @@ function cleanQuery(q: string): string {
   return q.trim().replace(/\s+/g, " ");
 }
 
-// ─── Search cache (avoids re-hitting YouTube for the same query) ──────────────
-interface CacheEntry {
-  results: SearchResult[];
-  expiresAt: number;
-}
+// ─── Search cache ─────────────────────────────────────────────────────────────
+interface CacheEntry { results: SearchResult[]; expiresAt: number }
 const searchCache = new Map<string, CacheEntry>();
-const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+const CACHE_TTL_MS = 30 * 60 * 1000;
 
 function getCached(key: string): SearchResult[] | null {
-  const entry = searchCache.get(key);
-  if (!entry) return null;
-  if (Date.now() > entry.expiresAt) {
-    searchCache.delete(key);
-    return null;
-  }
-  return entry.results;
+  const e = searchCache.get(key);
+  if (!e) return null;
+  if (Date.now() > e.expiresAt) { searchCache.delete(key); return null; }
+  return e.results;
 }
-
 function setCache(key: string, results: SearchResult[]): void {
   searchCache.set(key, { results, expiresAt: Date.now() + CACHE_TTL_MS });
-  // Keep cache from growing unbounded
   if (searchCache.size > 200) {
     const oldest = searchCache.keys().next().value;
     if (oldest) searchCache.delete(oldest);
@@ -49,25 +41,15 @@ export async function searchMusic(
 ): Promise<SearchResult[]> {
   let q = cleanQuery(query);
   if (!q) return [];
-
   switch (kind) {
-    case "song":
-      q = `${q} audio`;
-      break;
-    case "artist":
-      q = `${q} top songs`;
-      break;
-    case "movie":
-      q = `${q} movie songs jukebox`;
-      break;
-    case "lyrics":
-      break;
+    case "song":    q = `${q} audio`; break;
+    case "artist":  q = `${q} top songs`; break;
+    case "movie":   q = `${q} movie songs jukebox`; break;
+    case "lyrics":  break;
   }
-
   const cacheKey = `${kind}:${q}`;
   const cached = getCached(cacheKey);
   if (cached) return cached;
-
   try {
     const videos = await YouTube.search(q, { type: "video", limit, safeSearch: false });
     const results = videos
@@ -96,146 +78,161 @@ export interface DownloadedAudio {
   webUrl: string;
 }
 
-interface YtDlpJson {
-  title?: string;
-  uploader?: string;
-  artist?: string;
-  creator?: string;
-  channel?: string;
-  duration?: number;
-  thumbnail?: string;
-  webpage_url?: string;
-  track?: string;
-}
+// ─── yt-dlp path (primary) ────────────────────────────────────────────────────
+// Try multiple player clients — cloud IPs are blocked by YouTube's default
+// web client but iOS/Android clients often bypass those restrictions.
+const PLAYER_CLIENTS = ["ios", "android", "mweb"] as const;
 
-// Try iOS first (bypasses cloud IP blocks), fall back to android then web.
-const PLAYER_CLIENTS = ["ios", "android", "web"] as const;
-
-function runYtDlpJson(url: string, client: string): Promise<YtDlpJson> {
+function ytDlpJson(url: string, client: string): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
-    const args = [
-      "--dump-single-json",
-      "--no-warnings",
-      "--no-playlist",
-      "--extractor-args",
-      `youtube:player_client=${client}`,
-      "--force-ipv4",
-      "--socket-timeout",
-      "15",
-      "--retries",
-      "1",
-      url,
-    ];
-    const child = spawn("yt-dlp", args, { stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (c) => (stdout += c.toString()));
-    child.stderr.on("data", (c) => (stderr += c.toString()));
+    const child = spawn("yt-dlp", [
+      "--dump-single-json", "--no-warnings", "--no-playlist",
+      "--extractor-args", `youtube:player_client=${client}`,
+      "--force-ipv4", "--socket-timeout", "12", "--retries", "1", url,
+    ], { stdio: ["ignore", "pipe", "pipe"] });
+    let out = "", err = "";
+    child.stdout.on("data", (c) => (out += c));
+    child.stderr.on("data", (c) => (err += c));
     child.on("error", reject);
     child.on("close", (code) => {
-      if (code !== 0) {
-        return reject(new Error(`yt-dlp info (${client}) failed (${code}): ${stderr.trim().slice(0, 200)}`));
-      }
-      try {
-        resolve(JSON.parse(stdout) as YtDlpJson);
-      } catch (e) {
-        reject(new Error(`yt-dlp json parse failed: ${(e as Error).message}`));
-      }
+      if (code !== 0) return reject(new Error(`yt-dlp info (${client}): ${err.slice(0, 150)}`));
+      try { resolve(JSON.parse(out)); } catch (e) { reject(e); }
     });
   });
 }
 
-function runYtDlpDownload(url: string, outPath: string, client: string): Promise<void> {
+function ytDlpDownload(url: string, out: string, client: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    const args = [
-      "--no-warnings",
-      "--no-playlist",
-      "--no-progress",
-      "--extractor-args",
-      `youtube:player_client=${client}`,
-      "--force-ipv4",
-      "--socket-timeout",
-      "20",
-      "--retries",
-      "1",
-      "--fragment-retries",
-      "1",
-      // 128k is indistinguishable from higher for Telegram voice playback
-      // and downloads ~2-3x faster than "best"
-      "-f",
-      "bestaudio[abr<=128]/bestaudio/best",
-      "--extract-audio",
-      "--audio-format",
-      "mp3",
-      "--audio-quality",
-      "5",
-      "-o",
-      outPath,
-      url,
-    ];
-    const child = spawn("yt-dlp", args, { stdio: ["ignore", "pipe", "pipe"] });
-    let stderr = "";
-    child.stderr.on("data", (c) => (stderr += c.toString()));
-    child.stdout.on("data", () => undefined);
+    const child = spawn("yt-dlp", [
+      "--no-warnings", "--no-playlist", "--no-progress",
+      "--extractor-args", `youtube:player_client=${client}`,
+      "--force-ipv4", "--socket-timeout", "20", "--retries", "1", "--fragment-retries", "1",
+      "-f", "bestaudio[abr<=128]/bestaudio/best",
+      "--extract-audio", "--audio-format", "mp3", "--audio-quality", "5",
+      "-o", out, url,
+    ], { stdio: ["ignore", "pipe", "pipe"] });
+    let err = "";
+    child.stderr.on("data", (c) => (err += c));
     child.on("error", reject);
     child.on("close", (code) => {
       if (code === 0) resolve();
-      else reject(new Error(`yt-dlp download (${client}) failed (${code}): ${stderr.trim().slice(0, 200)}`));
+      else reject(new Error(`yt-dlp dl (${client}): ${err.slice(0, 150)}`));
     });
   });
 }
 
-async function tryDownload(url: string, outTemplate: string): Promise<YtDlpJson> {
-  let lastErr: Error | undefined;
-  for (const client of PLAYER_CLIENTS) {
-    try {
-      // Run info fetch and download in parallel for speed; both use same client.
-      const [info] = await Promise.all([
-        runYtDlpJson(url, client),
-        runYtDlpDownload(url, outTemplate, client),
-      ]);
-      return info;
-    } catch (err) {
-      lastErr = err as Error;
-      console.error(`[music] client=${client} failed: ${lastErr.message}`);
-    }
-  }
-  throw lastErr ?? new Error("all player clients failed");
+// ─── Piped API fallback (works on all cloud IPs, no auth needed) ──────────────
+// Piped is an open-source YouTube frontend — its API returns direct audio
+// stream URLs that ffmpeg can download directly, bypassing yt-dlp entirely.
+const PIPED_INSTANCES = [
+  "https://pipedapi.kavin.rocks",
+  "https://pipedapi.adminforge.de",
+  "https://piped-api.garudalinux.org",
+];
+
+interface PipedStream {
+  url: string;
+  mimeType?: string;
+  bitrate?: number;
+  quality?: string;
+}
+interface PipedResponse {
+  title?: string;
+  uploader?: string;
+  duration?: number;
+  thumbnailUrl?: string;
+  audioStreams?: PipedStream[];
 }
 
+async function getPipedAudio(videoId: string): Promise<{ streamUrl: string; meta: PipedResponse }> {
+  const errors: string[] = [];
+  for (const base of PIPED_INSTANCES) {
+    try {
+      const resp = await fetch(`${base}/streams/${videoId}`, {
+        signal: AbortSignal.timeout(10000),
+        headers: { "User-Agent": "Mozilla/5.0" },
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = (await resp.json()) as PipedResponse;
+      const streams = (data.audioStreams ?? []).filter((s) => s.url);
+      if (!streams.length) throw new Error("no audio streams");
+      // Pick the best stream (highest bitrate ≤ 128 kbps, or best available)
+      const best = streams
+        .sort((a, b) => (b.bitrate ?? 0) - (a.bitrate ?? 0))
+        .find((s) => (s.bitrate ?? 999) <= 130000) ?? streams[0];
+      return { streamUrl: best.url, meta: data };
+    } catch (err) {
+      errors.push(`${base}: ${(err as Error).message}`);
+    }
+  }
+  throw new Error(`All Piped instances failed: ${errors.join("; ")}`);
+}
+
+function ffmpegDownloadUrl(streamUrl: string, outPath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("ffmpeg", [
+      "-y", "-loglevel", "error",
+      "-i", streamUrl,
+      "-vn", "-ar", "44100", "-ac", "2", "-b:a", "128k",
+      outPath,
+    ], { stdio: ["ignore", "pipe", "pipe"] });
+    let err = "";
+    child.stderr.on("data", (c) => (err += c));
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`ffmpeg: ${err.slice(0, 200)}`));
+    });
+  });
+}
+
+// ─── Main download orchestrator ───────────────────────────────────────────────
 export async function downloadAsMp3(url: string): Promise<DownloadedAudio> {
   await ensureTmp();
   const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const outTemplate = path.join(TMP_DIR, `${id}.%(ext)s`);
   const finalPath = path.join(TMP_DIR, `${id}.mp3`);
 
-  const info = await tryDownload(url, outTemplate);
+  const videoId = new URL(url).searchParams.get("v") ?? url.split("v=")[1]?.split("&")[0] ?? "";
 
-  try {
-    await fs.access(finalPath);
-  } catch {
-    throw new Error("download completed but mp3 not found");
+  // ── Attempt 1: yt-dlp with multiple player clients ──
+  for (const client of PLAYER_CLIENTS) {
+    try {
+      const [info] = await Promise.all([
+        ytDlpJson(url, client),
+        ytDlpDownload(url, outTemplate, client),
+      ]);
+      await fs.access(finalPath);
+      return {
+        filePath: finalPath,
+        title: String(info.track || info.title || "Unknown"),
+        artist: String(info.artist || info.creator || info.uploader || info.channel || "Unknown"),
+        durationSec: Math.round(Number(info.duration) || 0),
+        thumbUrl: info.thumbnail as string | undefined,
+        webUrl: String(info.webpage_url || url),
+      };
+    } catch (err) {
+      console.error(`[music] yt-dlp client=${client} failed:`, (err as Error).message);
+    }
   }
 
-  const title = info.track || info.title || "Unknown";
-  const artist =
-    info.artist || info.creator || info.uploader || info.channel || "Unknown";
-  const durationSec = Math.round(info.duration || 0);
+  // ── Attempt 2: Piped API + direct ffmpeg download ──
+  console.log("[music] yt-dlp all clients failed, trying Piped API…");
+  if (!videoId) throw new Error("cannot extract videoId from URL");
+  const { streamUrl, meta } = await getPipedAudio(videoId);
+  await ffmpegDownloadUrl(streamUrl, finalPath);
+  await fs.access(finalPath);
 
   return {
     filePath: finalPath,
-    title,
-    artist,
-    durationSec,
-    thumbUrl: info.thumbnail,
-    webUrl: info.webpage_url || url,
+    title: meta.title || "Unknown",
+    artist: meta.uploader || "Unknown",
+    durationSec: Math.round(meta.duration || 0),
+    thumbUrl: meta.thumbnailUrl,
+    webUrl: url,
   };
 }
 
 export async function cleanupTempFile(filePath: string): Promise<void> {
-  try {
-    await fs.unlink(filePath);
-  } catch {
-    /* ignore */
-  }
+  try { await fs.unlink(filePath); } catch { /* ignore */ }
 }
