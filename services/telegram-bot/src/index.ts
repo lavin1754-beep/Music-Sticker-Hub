@@ -872,7 +872,15 @@ async function main(): Promise<void> {
   const app = express();
   app.use(express.json());
 
-  app.post("/telegram/webhook", webhookCallback(bot, "express"));
+  app.post("/telegram/webhook", async (req: Request, res: Response) => {
+    try {
+      const handler = webhookCallback(bot, "express");
+      await handler(req, res);
+    } catch (e) {
+      console.error("[webhook] error:", e);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
   app.get("/telegram/health", (_req: Request, res: Response) => {
     res.json({ ok: true, bot: botUsername });
   });
