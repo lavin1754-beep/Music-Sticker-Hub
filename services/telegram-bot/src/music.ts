@@ -25,7 +25,6 @@ export async function initCookies(): Promise<void> {
   }
 }
 
-// ─── Search cache ─────────────────────────────────────────────────────────────
 interface CacheEntry { results: SearchResult[]; expiresAt: number }
 const searchCache = new Map<string, CacheEntry>();
 const CACHE_TTL = 30 * 60 * 1000;
@@ -48,9 +47,9 @@ export async function searchMusic(
   let q = query.trim().replace(/\s+/g, " ");
   if (!q) return [];
   switch (kind) {
-    case "song":   q += " audio"; break;
+    case "song": q += " audio"; break;
     case "artist": q += " top songs"; break;
-    case "movie":  q += " movie songs jukebox"; break;
+    case "movie": q += " movie songs jukebox"; break;
     case "lyrics": break;
   }
   const key = `${kind}:${q}`;
@@ -84,8 +83,6 @@ export interface DownloadedAudio {
   webUrl: string;
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
 function stripSuffix(t: string): string {
   return t
     .replace(/\(official\s*(music\s*)?video\)/gi, "")
@@ -99,7 +96,6 @@ function stripSuffix(t: string): string {
     .trim();
 }
 
-/** Run a command, draining BOTH stdout and stderr to avoid buffer deadlock. */
 function runCmd(cmd: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
@@ -115,14 +111,13 @@ function runCmd(cmd: string, args: string[]): Promise<{ stdout: string; stderr: 
   });
 }
 
-/** After a yt-dlp download, find the resulting .mp3 file by prefix and move to finalPath. */
 async function findAndMoveMp3(outDir: string, prefix: string, finalPath: string): Promise<boolean> {
   const expected = path.join(outDir, `${prefix}.mp3`);
   try {
     await fs.access(expected);
     if (expected !== finalPath) await fs.rename(expected, finalPath);
     return true;
-  } catch { /* fall through */ }
+  } catch { }
   const files = await fs.readdir(outDir);
   const match = files.find((f) => f.startsWith(prefix) && f.endsWith(".mp3"));
   if (match) {
@@ -131,9 +126,6 @@ async function findAndMoveMp3(outDir: string, prefix: string, finalPath: string)
   }
   return false;
 }
-
-// ─── Source 1: JioSaavn CDN ───────────────────────────────────────────────────
-// Licensed music CDN. Works on cloud servers (Railway). Blocked on Replit DNS.
 
 interface SaavnSong {
   name?: string;
@@ -169,7 +161,7 @@ async function tryJioSaavn(
       const data = JSON.parse(text) as { data?: { results?: SaavnSong[] } };
       const results = data.data?.results ?? [];
       if (results.length) { song = results[0]; break; }
-    } catch { /* try next */ }
+    } catch { }
   }
 
   if (!song) return null;
@@ -203,19 +195,6 @@ async function tryJioSaavn(
   };
 }
 
-// ─── Source 2: SoundCloud via yt-dlp (TWO-STEP, confirmed working) ────────────
-//
-// BUG in yt-dlp 2025.06.30: "scsearch1:" generates broken URL
-//   https://api.soundcloud.com/tracks/soundcloud%3Atracks%3A853582540  ← BROKEN
-//
-// FIX (confirmed on Replit):
-//   Step 1: scsearch + --flat-playlist --print "%(webpage_url)s"
-//           → returns real https://soundcloud.com/artist/track URL
-//   Step 2: yt-dlp "https://soundcloud.com/..." -x --audio-format mp3
-//           → downloads directly using SoundcloudIE (different extractor, works)
-//
-// SoundCloud does NOT block cloud IPs → works on Railway too.
-
 async function trySoundCloud(
   title: string,
   artist: string,
@@ -225,7 +204,6 @@ async function trySoundCloud(
   const outDir = path.dirname(outPath);
   const prefix = path.basename(outPath, ".mp3") + "-sc";
 
-  // Step 1: find the real SoundCloud webpage URL via scsearch (flat mode only)
   let trackUrl = "";
   try {
     const { stdout } = await runCmd("yt-dlp", [
@@ -241,12 +219,8 @@ async function trySoundCloud(
     return null;
   }
 
-  if (!trackUrl) {
-    console.error("[music] SC: no webpage_url found");
-    return null;
-  }
+  if (!trackUrl) return null;
 
-  // Step 2: download the real SoundCloud URL (uses SoundcloudIE, not SoundcloudSearchIE)
   try {
     await runCmd("yt-dlp", [
       "--no-warnings", "--no-progress",
@@ -257,7 +231,6 @@ async function trySoundCloud(
       trackUrl,
     ]);
     if (await findAndMoveMp3(outDir, prefix, outPath)) {
-      console.log("[music] ✓ SoundCloud:", trackUrl);
       return { title, artist, durationSec: 0 };
     }
   } catch (err) {
@@ -265,10 +238,6 @@ async function trySoundCloud(
   }
   return null;
 }
-
-// ─── Source 3: YouTube via ytsearch + iOS client ──────────────────────────────
-// Confirmed working on Replit (GCP). iOS player API uses HLS which is less
-// aggressively IP-blocked than the regular web player API.
 
 async function tryYtSearch(
   title: string,
@@ -295,7 +264,6 @@ async function tryYtSearch(
     try {
       await runCmd("yt-dlp", args);
       if (await findAndMoveMp3(outDir, prefix, outPath)) {
-        console.log(`[music] ✓ ytsearch(${client})`);
         return { title, artist, durationSec: 0 };
       }
     } catch (err) {
@@ -304,8 +272,6 @@ async function tryYtSearch(
   }
   return null;
 }
-
-// ─── Source 4: Direct YouTube URL via yt-dlp ─────────────────────────────────
 
 async function tryYouTubeDirect(
   url: string,
@@ -334,7 +300,6 @@ async function tryYouTubeDirect(
     try {
       await runCmd("yt-dlp", args);
       if (await findAndMoveMp3(outDir, prefix, outPath)) {
-        console.log(`[music] ✓ ytdirect(${client})`);
         return { title, artist, durationSec: 0 };
       }
     } catch (err) {
@@ -343,8 +308,6 @@ async function tryYouTubeDirect(
   }
   return null;
 }
-
-// ─── Debug: test all sources, return a status report ─────────────────────────
 
 export async function debugSources(): Promise<string> {
   const lines: string[] = [];
@@ -355,7 +318,6 @@ export async function debugSources(): Promise<string> {
   lines.push(`cookies: ${cookiesReady ? "yes" : "no"}`);
   lines.push("");
 
-  // Test JioSaavn
   try {
     const resp = await fetch("https://saavn.dev/api/search/songs?query=tum+hi+ho&limit=1", {
       signal: AbortSignal.timeout(8000),
@@ -368,7 +330,6 @@ export async function debugSources(): Promise<string> {
     lines.push(`JioSaavn (saavn.dev): ✗ ${(e as Error).message.slice(0, 60)}`);
   }
 
-  // Test SoundCloud search step
   try {
     const { stdout } = await runCmd("yt-dlp", [
       "--no-warnings", "--flat-playlist", "--print", "%(webpage_url)s",
@@ -380,7 +341,6 @@ export async function debugSources(): Promise<string> {
     lines.push(`SoundCloud search: ✗ ${(e as Error).message.slice(0, 80)}`);
   }
 
-  // Test YouTube search
   try {
     const { stdout } = await runCmd("yt-dlp", [
       "--no-warnings", "--flat-playlist", "--print", "%(id)s",
@@ -396,50 +356,42 @@ export async function debugSources(): Promise<string> {
   return lines.join("\n");
 }
 
-// ─── Main entry ───────────────────────────────────────────────────────────────
-
 export async function downloadAsMp3(
   url: string,
   titleHint = "",
   artistHint = "",
+  videoId = "",
 ): Promise<DownloadedAudio> {
   await ensureTmp();
   const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const finalPath = path.join(TMP_DIR, `${id}.mp3`);
 
-  // 1️⃣ JioSaavn CDN — licensed, no IP block, Railway-friendly
-  if (titleHint) {
-    try {
-      const m = await tryJioSaavn(titleHint, artistHint, finalPath);
-      if (m) return { filePath: finalPath, webUrl: url, ...m };
-    } catch (e) { console.error("[music] JioSaavn:", (e as Error).message); }
-  }
-
-  // 2️⃣ SoundCloud TWO-STEP — confirmed working, no cloud IP block
-  if (titleHint) {
-    try {
-      const m = await trySoundCloud(titleHint, artistHint, finalPath);
-      if (m) return { filePath: finalPath, webUrl: url, ...m };
-    } catch (e) { console.error("[music] SC:", (e as Error).message); }
-  }
-
-  // 3️⃣ YouTube search via iOS client — confirmed working on GCP/Replit
-  if (titleHint) {
-    try {
-      const m = await tryYtSearch(titleHint, artistHint, finalPath);
-      if (m) return { filePath: finalPath, webUrl: url, ...m };
-    } catch (e) { console.error("[music] ytSearch:", (e as Error).message); }
-  }
-
-  // 4️⃣ Direct YouTube URL — last resort
-  {
-    const m = await tryYouTubeDirect(url, finalPath, titleHint, artistHint);
+  if (videoId) {
+    const m = await tryYouTubeDirect(`https://www.youtube.com/watch?v=${videoId}`, finalPath, titleHint, artistHint);
     if (m) return { filePath: finalPath, webUrl: url, ...m };
   }
+
+  if (titleHint) {
+    const m1 = await trySoundCloud(titleHint, artistHint, finalPath);
+    if (m1) return { filePath: finalPath, webUrl: url, ...m1 };
+  }
+
+  if (titleHint) {
+    const m2 = await tryYtSearch(titleHint, artistHint, finalPath);
+    if (m2) return { filePath: finalPath, webUrl: url, ...m2 };
+  }
+
+  if (titleHint) {
+    const m3 = await tryJioSaavn(titleHint, artistHint, finalPath);
+    if (m3) return { filePath: finalPath, webUrl: url, ...m3 };
+  }
+
+  const m4 = await tryYouTubeDirect(url, finalPath, titleHint, artistHint);
+  if (m4) return { filePath: finalPath, webUrl: url, ...m4 };
 
   throw new Error("All music sources failed — see Railway logs for details.");
 }
 
 export async function cleanupTempFile(filePath: string): Promise<void> {
-  try { await fs.unlink(filePath); } catch { /* ignore */ }
+  try { await fs.unlink(filePath); } catch { }
 }

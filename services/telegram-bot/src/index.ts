@@ -280,8 +280,7 @@ bot.callbackQuery(/^music:p:([\w-]{6,32})$/, async (ctx) => {
   const uid = ctx.from.id;
   setState(uid, { selectedVideoId: videoId });
   const s = getState(uid);
-  const all = s.searchResults || [];
-  const pick = all.find((r) => r.videoId === videoId) ?? {
+  const pick = s.searchResults?.find((r) => r.videoId === videoId) ?? {
     videoId,
     title: "Selected track",
     url: `https://www.youtube.com/watch?v=${videoId}`,
@@ -403,7 +402,7 @@ async function handleMusicQuery(
   const uid = ctx.from.id;
   const wait = await ctx.reply("🔎 Searching…");
 
-  const results = await searchMusic(query, kind, 50);
+  const results = await searchMusic(query, kind, 200);
   await safeDeleteMessage(ctx, wait.message_id);
 
   if (results.length === 0) {
