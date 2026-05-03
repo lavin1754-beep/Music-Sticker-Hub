@@ -872,7 +872,7 @@ async function main(): Promise<void> {
   const app = express();
   app.use(express.json());
 
-  app.post("/telegram/webhook", express.json(), webhookCallback(bot));
+  app.post("/telegram/webhook", webhookCallback(bot, "express"));
   app.get("/telegram/health", (_req: Request, res: Response) => {
     res.json({ ok: true, bot: botUsername });
   });
