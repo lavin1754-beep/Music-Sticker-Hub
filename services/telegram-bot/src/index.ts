@@ -1,6 +1,7 @@
-import { Bot, InputFile, GrammyError, HttpError } from "grammy";
+import { Bot, InputFile, GrammyError, HttpError, webhookCallback } from "grammy";
 import type { Context } from "grammy";
-import { run, sequentialize } from "@grammyjs/runner";
+import { sequentialize } from "@grammyjs/runner";
+import express from "express";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -862,15 +863,37 @@ async function main(): Promise<void> {
   const me = await bot.api.getMe();
   botUsername = me.username;
   console.log(`[bot] starting as @${botUsername}`);
-  await bot.api.deleteWebhook({ drop_pending_updates: true });
 
-  run(bot);
-  console.log("[bot] polling started (concurrent mode)");
+  const port = process.env.PORT || 3000;
+  const domain = process.env.REPLIT_DEV_DOMAIN || "localhost";
+  const webhookUrl = `https://${domain}/telegram/webhook`;
+
+  const app = express();
+  app.use(express.json());
+
+  app.post("/telegram/webhook", webhookCallback(bot));
+  app.get("/telegram/health", (req, res) => {
+    res.json({ ok: true, bot: botUsername });
+  });
+
+  const server = app.listen(port, async () => {
+    console.log(`[bot] webhook server listening on port ${port}`);
+    
+    try {
+      await bot.api.setWebhook(webhookUrl);
+      console.log(`[bot] webhook set to ${webhookUrl}`);
+    } catch (err) {
+      console.error("[bot] failed to set webhook:", err);
+      process.exit(1);
+    }
+  });
 
   async function shutdown(): Promise<void> {
     isShuttingDown = true;
     console.log("[bot] shutting down…");
-    process.exit(0);
+    server.close(() => {
+      process.exit(0);
+    });
   }
   
   process.once("SIGINT", shutdown);
