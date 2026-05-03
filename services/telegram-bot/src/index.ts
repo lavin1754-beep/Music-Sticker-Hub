@@ -793,16 +793,33 @@ async function replyWithStickerLink(ctx: Context, uid: number, shortName: string
   });
 }
 
+let isShuttingDown = false;
+let restartTimeout: NodeJS.Timeout | null = null;
+
 bot.catch((err) => {
+  if (isShuttingDown) return;
   const e = err.error;
+  if (e instanceof GrammyError && e.description.includes("409")) {
+    console.warn("[bot] 409 conflict: another instance is polling. Restarting in 3s…");
+    if (restartTimeout) clearTimeout(restartTimeout);
+    restartTimeout = setTimeout(() => {
+      if (!isShuttingDown) {
+        console.log("[bot] attempting restart…");
+        main().catch((err2) => {
+          console.error("[bot] restart failed:", err2);
+          process.exit(1);
+        });
+      }
+    }, 3000);
+    return;
+  }
   if (e instanceof GrammyError) {
-    if (e.description.includes("409") || e.description.includes("Conflict: terminated by other getUpdates request")) {
-      console.error("[bot] another bot instance is already polling");
-      return;
-    }
     console.error("[grammy]", e.description);
-  } else if (e instanceof HttpError) console.error("[http]", e);
-  else console.error("[bot]", e);
+  } else if (e instanceof HttpError) {
+    console.error("[http]", e);
+  } else {
+    console.error("[bot]", e);
+  }
 });
 
 async function main(): Promise<void> {
@@ -812,14 +829,17 @@ async function main(): Promise<void> {
   botUsername = me.username;
   console.log(`[bot] starting as @${botUsername}`);
   await bot.api.deleteWebhook({ drop_pending_updates: true });
-  const handle = run(bot);
+
+  run(bot);
   console.log("[bot] polling started (concurrent mode)");
 
   async function shutdown(): Promise<void> {
+    isShuttingDown = true;
     console.log("[bot] shutting down…");
-    await handle.stop();
+    if (restartTimeout) clearTimeout(restartTimeout);
     process.exit(0);
   }
+  
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
 }

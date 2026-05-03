@@ -52,7 +52,8 @@ export async function searchMusic(
     const url = `https://piped.video/api/v1/search?q=${encodeURIComponent(q)}&type=video`;
     const resp = await fetch(url, { headers: { Accept: "application/json" } });
     if (!resp.ok) return [];
-    const data = await resp.json() as Array<{ url?: string; title?: string; uploaderName?: string; duration?: number; shortDescription?: string }>;
+    const json = await resp.json() as { results?: Array<{ url?: string; title?: string; uploaderName?: string; duration?: number; shortDescription?: string }> };
+    const data = json.results || (Array.isArray(json) ? json : []);
     const results = data.slice(0, limit).flatMap((v) => {
       const id = v.url?.match(/v=([\w-]{6,32})/)?.[1] ?? v.url?.match(/\/watch\/([\w-]{6,32})/)?.[1];
       if (!id || !v.title) return [];
@@ -66,7 +67,8 @@ export async function searchMusic(
     });
     setCache(key, results);
     return results;
-  } catch {
+  } catch (err) {
+    console.error("[music search] failed:", err instanceof Error ? err.message : String(err));
     return [];
   }
 }
