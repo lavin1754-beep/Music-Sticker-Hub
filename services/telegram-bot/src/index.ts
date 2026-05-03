@@ -819,23 +819,12 @@ async function replyWithStickerLink(ctx: Context, uid: number, shortName: string
 }
 
 let isShuttingDown = false;
-let restartTimeout: NodeJS.Timeout | null = null;
 
 bot.catch((err) => {
   if (isShuttingDown) return;
   const e = err.error;
   if (e instanceof GrammyError && e.description.includes("409")) {
-    console.warn("[bot] 409 conflict: another instance is polling. Restarting in 5s…");
-    if (restartTimeout) clearTimeout(restartTimeout);
-    restartTimeout = setTimeout(() => {
-      if (!isShuttingDown) {
-        console.log("[bot] attempting restart…");
-        startBot().catch((err2) => {
-          console.error("[bot] restart failed:", err2);
-          process.exit(1);
-        });
-      }
-    }, 5000);
+    console.warn("[bot] 409 conflict detected, skipping…");
     return;
   }
   if (e instanceof GrammyError) {
@@ -849,38 +838,23 @@ bot.catch((err) => {
 
 process.on("unhandledRejection", (reason) => {
   if (isShuttingDown) return;
-  if (reason instanceof GrammyError && reason.description.includes("409")) {
-    console.warn("[bot] 409 in unhandledRejection, restarting…");
-    if (restartTimeout) clearTimeout(restartTimeout);
-    restartTimeout = setTimeout(() => {
-      if (!isShuttingDown) {
-        startBot().catch(console.error);
-      }
-    }, 5000);
+  const msg = String(reason);
+  if (msg.includes("409") || msg.includes("Conflict")) {
+    console.warn("[bot] 409 in rejection, ignoring…");
     return;
   }
   console.error("[unhandledRejection]", reason);
 });
 
 process.on("uncaughtException", (err) => {
-  console.error("[uncaughtException]", err);
-  if (String(err).includes("409")) {
-    console.warn("[bot] 409 in uncaughtException, restarting…");
-    if (restartTimeout) clearTimeout(restartTimeout);
-    restartTimeout = setTimeout(() => {
-      if (!isShuttingDown) {
-        startBot().catch(console.error);
-      }
-    }, 5000);
+  const msg = String(err);
+  if (msg.includes("409") || msg.includes("Conflict")) {
+    console.warn("[bot] 409 in exception, continuing…");
     return;
   }
+  console.error("[uncaughtException]", err);
   process.exit(1);
 });
-
-async function startBot(): Promise<void> {
-  run(bot);
-  console.log("[bot] polling started (concurrent mode)");
-}
 
 async function main(): Promise<void> {
   await loadStore();
@@ -890,12 +864,12 @@ async function main(): Promise<void> {
   console.log(`[bot] starting as @${botUsername}`);
   await bot.api.deleteWebhook({ drop_pending_updates: true });
 
-  await startBot();
+  run(bot);
+  console.log("[bot] polling started (concurrent mode)");
 
   async function shutdown(): Promise<void> {
     isShuttingDown = true;
     console.log("[bot] shutting down…");
-    if (restartTimeout) clearTimeout(restartTimeout);
     process.exit(0);
   }
   

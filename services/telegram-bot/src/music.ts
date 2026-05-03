@@ -32,17 +32,39 @@ function setCache(k: string, r: SearchResult[]): void {
   searchCache.set(k, { results: r, expiresAt: Date.now() + CACHE_TTL });
 }
 
-function runCmd(cmd: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
+function runCmd(cmd: string, args: string[], logLabel = ""): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
+    console.log(`[runCmd] starting ${cmd}${logLabel ? " " + logLabel : ""} with ${args.length} args`);
     const child = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
     let out = "";
     let err = "";
-    child.stdout.on("data", (c: Buffer) => (out += c));
-    child.stderr.on("data", (c: Buffer) => (err += c));
-    child.on("error", reject);
+    let outputLines = 0;
+    let errorLines = 0;
+    
+    child.stdout.on("data", (c: Buffer) => {
+      out += c;
+      outputLines++;
+    });
+    child.stderr.on("data", (c: Buffer) => {
+      err += c;
+      errorLines++;
+      if (c.toString().includes("ERROR") || c.toString().includes("Signature extraction")) {
+        console.warn(`[runCmd] stderr: ${c.toString().slice(0, 100)}`);
+      }
+    });
+    child.on("error", (e) => {
+      console.error(`[runCmd] spawn error: ${e.message}`);
+      reject(e);
+    });
     child.on("close", (code) => {
-      if (code === 0) resolve({ stdout: out, stderr: err });
-      else reject(new Error(`${cmd} exited ${code}: ${err.slice(0, 200)}`));
+      console.log(`[runCmd] exited with code ${code} (${outputLines} out lines, ${errorLines} err lines)`);
+      if (code === 0) {
+        resolve({ stdout: out, stderr: err });
+      } else {
+        const msg = `${cmd} exited ${code}: ${err.slice(0, 300)}`;
+        console.error(`[runCmd] ${msg}`);
+        reject(new Error(msg));
+      }
     });
   });
 }
