@@ -2,6 +2,7 @@ import { Bot, InputFile, GrammyError, HttpError, webhookCallback } from "grammy"
 import type { Context } from "grammy";
 import { sequentialize } from "@grammyjs/runner";
 import express from "express";
+import type { Request, Response } from "express";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -871,8 +872,8 @@ async function main(): Promise<void> {
   const app = express();
   app.use(express.json());
 
-  app.post("/telegram/webhook", webhookCallback(bot));
-  app.get("/telegram/health", (req, res) => {
+  app.post("/telegram/webhook", express.json(), webhookCallback(bot));
+  app.get("/telegram/health", (_req: Request, res: Response) => {
     res.json({ ok: true, bot: botUsername });
   });
 
