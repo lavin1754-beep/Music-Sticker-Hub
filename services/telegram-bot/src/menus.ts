@@ -39,11 +39,12 @@ export function musicOptionsMenu(audioRecognitionEnabled: boolean): InlineKeyboa
 
 export function resultsMenu(results: Array<{ videoId: string }>): InlineKeyboard {
   const kb = new InlineKeyboard();
-  results.forEach((r, i) => {
-    kb.text(`${i + 1}`, `music:p:${r.videoId}`);
+  const total = Math.min(results.length, 100);
+  for (let i = 0; i < total; i++) {
+    kb.text(`${i + 1}`, `music:p:${results[i].videoId}`);
     if ((i + 1) % 5 === 0) kb.row();
-  });
-  if (results.length % 5 !== 0) kb.row();
+  }
+  if (total % 5 !== 0) kb.row();
   kb.text("🔁 New Search", "music:new").text("⬅️ Back", "back");
   kb.row().text("🏠 Main Menu", "home");
   return kb;

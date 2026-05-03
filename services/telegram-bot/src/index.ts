@@ -17,7 +17,6 @@ import {
   incrementPackCount,
   findPack,
   type SearchResult,
-  type Mode,
 } from "./state.js";
 import {
   WELCOME_MESSAGE,
@@ -75,7 +74,7 @@ async function showHome(ctx: Context, userId: number): Promise<void> {
 
 async function showMusicMenu(ctx: Context, userId: number): Promise<void> {
   pushHistory(userId);
-  setState(userId, { mode: "music", step: "menu", data: {} });
+  setState(userId, { mode: "music", step: "menu", data: {}, selectedVideoId: undefined });
   const text = "🎵 *Music Library*\n\nHow would you like to find your song?";
   if (ctx.callbackQuery && ctx.callbackQuery.message) {
     try {
@@ -265,6 +264,7 @@ bot.callbackQuery(/^music:opt:(song|artist|movie|lyrics|audio)$/, async (ctx) =>
     mode: "music",
     step: "await_query",
     searchKind: kind,
+    selectedVideoId: undefined,
   });
   await ctx.reply(promptForKind(kind), { parse_mode: "Markdown" });
 });
@@ -278,15 +278,13 @@ bot.callbackQuery("music:new", async (ctx) => {
 bot.callbackQuery(/^music:p:([\w-]{6,32})$/, async (ctx) => {
   const videoId = ctx.match[1];
   const uid = ctx.from.id;
-  setState(uid, { selectedVideoId: videoId });
   const s = getState(uid);
-  const pick = s.searchResults?.find((r) => r.videoId === videoId) ?? {
-    videoId,
-    title: "Selected track",
-    url: `https://www.youtube.com/watch?v=${videoId}`,
-    channel: "YouTube",
-    durationFormatted: "?",
-  };
+  const pick = s.searchResults?.find((r) => r.videoId === videoId);
+  if (!pick) {
+    await ctx.answerCallbackQuery({ text: "This result expired. Please search again.", show_alert: true });
+    return;
+  }
+  setState(uid, { selectedVideoId: videoId });
   await ctx.answerCallbackQuery({ text: "🎧 Fetching audio…" });
   await deliverAudio(ctx, pick);
 });
@@ -402,7 +400,7 @@ async function handleMusicQuery(
   const uid = ctx.from.id;
   const wait = await ctx.reply("🔎 Searching…");
 
-  const results = await searchMusic(query, kind, 200);
+  const results = await searchMusic(query, kind, 500);
   await safeDeleteMessage(ctx, wait.message_id);
 
   if (results.length === 0) {
@@ -414,9 +412,9 @@ async function handleMusicQuery(
     mode: "music",
     step: "results",
     searchResults: results,
-    searchPage: 0,
     searchQuery: query,
     searchKind: kind,
+    selectedVideoId: undefined,
   });
   await renderResultsPage(ctx, uid);
 }
@@ -713,7 +711,6 @@ async function createStickerPack(
   ];
 
   const tmp = await writeTempFromBuffer(firstSticker, ext);
-  let lastErr: unknown = null;
   let chosen: string | null = null;
 
   try {
@@ -729,10 +726,7 @@ async function createStickerPack(
         chosen = shortName;
         break;
       } catch (err) {
-        lastErr = err;
-        if (isShortNameTakenError(err)) {
-          continue;
-        }
+        if (isShortNameTakenError(err)) continue;
         console.error(`[pack create ${kind}] failed`, err);
         await ctx.reply(
           `😕 Couldn't create the pack: ${err instanceof Error ? err.message : "unknown"}`,
@@ -745,10 +739,7 @@ async function createStickerPack(
   }
 
   if (!chosen) {
-    console.error(`[pack create ${kind}] all candidates exhausted`, lastErr);
-    await ctx.reply(
-      "😕 Couldn't create that pack — please try again with a different name.",
-    );
+    await ctx.reply("😕 Couldn't create that pack — please try again with a different name.");
     return null;
   }
 

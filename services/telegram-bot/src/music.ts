@@ -31,9 +31,13 @@ const CACHE_TTL = 30 * 60 * 1000;
 
 function getCached(k: string): SearchResult[] | null {
   const e = searchCache.get(k);
-  if (!e || Date.now() > e.expiresAt) { searchCache.delete(k); return null; }
+  if (!e || Date.now() > e.expiresAt) {
+    searchCache.delete(k);
+    return null;
+  }
   return e.results;
 }
+
 function setCache(k: string, r: SearchResult[]): void {
   if (searchCache.size > 200) searchCache.delete(searchCache.keys().next().value!);
   searchCache.set(k, { results: r, expiresAt: Date.now() + CACHE_TTL });
@@ -42,7 +46,7 @@ function setCache(k: string, r: SearchResult[]): void {
 export async function searchMusic(
   query: string,
   kind: "song" | "artist" | "movie" | "lyrics",
-  limit = 30,
+  limit = 100,
 ): Promise<SearchResult[]> {
   let q = query.trim().replace(/\s+/g, " ");
   if (!q) return [];
@@ -117,7 +121,8 @@ async function findAndMoveMp3(outDir: string, prefix: string, finalPath: string)
     await fs.access(expected);
     if (expected !== finalPath) await fs.rename(expected, finalPath);
     return true;
-  } catch { }
+  } catch {
+  }
   const files = await fs.readdir(outDir);
   const match = files.find((f) => f.startsWith(prefix) && f.endsWith(".mp3"));
   if (match) {
@@ -161,11 +166,11 @@ async function tryJioSaavn(
       const data = JSON.parse(text) as { data?: { results?: SaavnSong[] } };
       const results = data.data?.results ?? [];
       if (results.length) { song = results[0]; break; }
-    } catch { }
+    } catch {
+    }
   }
 
   if (!song) return null;
-
   const urls = song.downloadUrl ?? [];
   const best =
     urls.find((u) => u.quality === "320kbps") ??
@@ -366,28 +371,21 @@ export async function downloadAsMp3(
   const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const finalPath = path.join(TMP_DIR, `${id}.mp3`);
 
-  if (videoId) {
-    const m = await tryYouTubeDirect(`https://www.youtube.com/watch?v=${videoId}`, finalPath, titleHint, artistHint);
-    if (m) return { filePath: finalPath, webUrl: url, ...m };
-  }
+  const directUrl = videoId ? `https://www.youtube.com/watch?v=${videoId}` : url;
+  const yt = await tryYouTubeDirect(directUrl, finalPath, titleHint, artistHint);
+  if (yt) return { filePath: finalPath, webUrl: url, ...yt };
 
-  if (titleHint) {
-    const m1 = await trySoundCloud(titleHint, artistHint, finalPath);
-    if (m1) return { filePath: finalPath, webUrl: url, ...m1 };
-  }
+  const sc = await trySoundCloud(titleHint, artistHint, finalPath);
+  if (sc) return { filePath: finalPath, webUrl: url, ...sc };
 
-  if (titleHint) {
-    const m2 = await tryYtSearch(titleHint, artistHint, finalPath);
-    if (m2) return { filePath: finalPath, webUrl: url, ...m2 };
-  }
+  const jio = await tryJioSaavn(titleHint, artistHint, finalPath);
+  if (jio) return { filePath: finalPath, webUrl: url, ...jio };
 
-  if (titleHint) {
-    const m3 = await tryJioSaavn(titleHint, artistHint, finalPath);
-    if (m3) return { filePath: finalPath, webUrl: url, ...m3 };
-  }
+  const yts = await tryYtSearch(titleHint, artistHint, finalPath);
+  if (yts) return { filePath: finalPath, webUrl: url, ...yts };
 
-  const m4 = await tryYouTubeDirect(url, finalPath, titleHint, artistHint);
-  if (m4) return { filePath: finalPath, webUrl: url, ...m4 };
+  const fallback = await tryYouTubeDirect(url, finalPath, titleHint, artistHint);
+  if (fallback) return { filePath: finalPath, webUrl: url, ...fallback };
 
   throw new Error("All music sources failed — see Railway logs for details.");
 }
