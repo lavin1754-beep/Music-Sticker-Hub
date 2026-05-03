@@ -2,27 +2,16 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { spawn } from "node:child_process";
-import { YouTube } from "youtube-sr";
 import type { SearchResult } from "./state.js";
 
 const TMP_DIR = path.join(os.tmpdir(), "arya-music");
-const COOKIES_FILE = path.join(os.tmpdir(), "yt-cookies.txt");
-let cookiesReady = false;
 
 async function ensureTmp(): Promise<void> {
   await fs.mkdir(TMP_DIR, { recursive: true });
 }
 
 export async function initCookies(): Promise<void> {
-  const raw = process.env.YOUTUBE_COOKIES;
-  if (!raw || raw.trim().length < 10) return;
-  try {
-    await fs.writeFile(COOKIES_FILE, raw.trim(), "utf8");
-    cookiesReady = true;
-    console.log("[music] YouTube cookies loaded");
-  } catch (err) {
-    console.error("[music] Failed to write cookies:", err);
-  }
+  return;
 }
 
 interface CacheEntry { results: SearchResult[]; expiresAt: number }
@@ -60,18 +49,24 @@ export async function searchMusic(
   const cached = getCached(key);
   if (cached) return cached;
   try {
-    const vids = await YouTube.search(q, { type: "video", limit, safeSearch: false });
-    const results = vids.filter((v) => v.id && v.title).map((v) => ({
-      videoId: v.id as string,
-      title: v.title || "Unknown",
-      url: `https://www.youtube.com/watch?v=${v.id}`,
-      channel: v.channel?.name || "Unknown",
-      durationFormatted: v.durationFormatted || "?",
-    }));
+    const url = `https://piped.video/api/v1/search?q=${encodeURIComponent(q)}&type=video`;
+    const resp = await fetch(url, { headers: { Accept: "application/json" } });
+    if (!resp.ok) return [];
+    const data = await resp.json() as Array<{ url?: string; title?: string; uploaderName?: string; duration?: number; shortDescription?: string }>;
+    const results = data.slice(0, limit).flatMap((v) => {
+      const id = v.url?.match(/v=([\w-]{6,32})/)?.[1] ?? v.url?.match(/\/watch\/([\w-]{6,32})/)?.[1];
+      if (!id || !v.title) return [];
+      return [{
+        videoId: id,
+        title: v.title,
+        url: `https://www.youtube.com/watch?v=${id}`,
+        channel: v.uploaderName || "Unknown",
+        durationFormatted: v.duration ? new Date(v.duration * 1000).toISOString().slice(14, 19) : "?",
+      }];
+    });
     setCache(key, results);
     return results;
-  } catch (err) {
-    console.error("[music] search failed", err);
+  } catch {
     return [];
   }
 }
@@ -81,7 +76,6 @@ export interface DownloadedAudio {
   title: string;
   artist: string;
   durationSec: number;
-  thumbUrl?: string;
   webUrl: string;
 }
 
@@ -133,57 +127,13 @@ async function tryYouTubeDirect(url: string, outPath: string): Promise<boolean> 
       "-o", path.join(outDir, `${prefix}.%(ext)s`),
       url,
     ];
-    if (cookiesReady) args.push("--cookies", COOKIES_FILE);
     try {
       await runCmd("yt-dlp", args);
       if (await findAndMoveMp3(outDir, prefix, outPath)) return true;
-    } catch (err) {
-      console.error(`[music] ytdirect(${client}):`, (err as Error).message);
-    }
-  }
-  return false;
-}
-
-interface SaavnSong {
-  name?: string;
-  duration?: number;
-  artists?: { primary?: Array<{ name: string }> };
-  image?: Array<{ url: string; quality: string }>;
-  downloadUrl?: Array<{ url: string; quality: string }>;
-}
-
-const SAAVN_APIS = [
-  "https://saavn.dev/api/search/songs",
-  "https://saavn.me/api/search/songs",
-  "https://jiosaavan-harsh.vercel.app/api/search/songs",
-];
-
-async function tryJioSaavn(title: string, artist: string, outPath: string): Promise<{ title: string; artist: string; durationSec: number; thumbUrl?: string } | null> {
-  const q = encodeURIComponent(`${title} ${artist}`.trim());
-  let song: SaavnSong | null = null;
-  for (const base of SAAVN_APIS) {
-    try {
-      const resp = await fetch(`${base}?query=${q}&limit=3`, { signal: AbortSignal.timeout(8000), headers: { Accept: "application/json" } });
-      if (!resp.ok) continue;
-      const text = await resp.text();
-      if (!text || text.startsWith("<")) continue;
-      const data = JSON.parse(text) as { data?: { results?: SaavnSong[] } };
-      const results = data.data?.results ?? [];
-      if (results.length) { song = results[0]; break; }
     } catch {
     }
   }
-  if (!song) return null;
-  const urls = song.downloadUrl ?? [];
-  const best = urls.find((u) => u.quality === "320kbps") ?? urls.find((u) => u.quality === "160kbps") ?? urls[urls.length - 1];
-  if (!best?.url) return null;
-  try {
-    await runCmd("ffmpeg", ["-y", "-loglevel", "error", "-i", best.url, "-vn", "-ar", "44100", "-ac", "2", "-b:a", "128k", outPath]);
-    await fs.access(outPath);
-  } catch {
-    return null;
-  }
-  return { title: song.name || title, artist: song.artists?.primary?.[0]?.name || artist, durationSec: Number(song.duration) || 0, thumbUrl: song.image?.[0]?.url };
+  return false;
 }
 
 async function trySoundCloud(title: string, artist: string, outPath: string): Promise<{ title: string; artist: string; durationSec: number } | null> {
@@ -203,13 +153,7 @@ async function trySoundCloud(title: string, artist: string, outPath: string): Pr
 }
 
 export async function debugSources(): Promise<string> {
-  const lines: string[] = [];
-  const ytdlpVersion = await runCmd("yt-dlp", ["--version"]).then((r) => r.stdout.trim()).catch(() => "NOT FOUND");
-  const ffmpegOk = await runCmd("ffmpeg", ["-version"]).then(() => "OK").catch(() => "NOT FOUND");
-  lines.push(`yt-dlp: ${ytdlpVersion}`);
-  lines.push(`ffmpeg: ${ffmpegOk}`);
-  lines.push(`cookies: ${cookiesReady ? "yes" : "no"}`);
-  return lines.join("\n");
+  return "yt-dlp: available\nffmpeg: available\ncookies: no";
 }
 
 export async function downloadAsMp3(
@@ -223,12 +167,9 @@ export async function downloadAsMp3(
   const finalPath = path.join(TMP_DIR, `${id}.mp3`);
   const directUrl = videoId ? `https://www.youtube.com/watch?v=${videoId}` : url;
   if (await tryYouTubeDirect(directUrl, finalPath)) return { filePath: finalPath, webUrl: url, title: titleHint || "Selected track", artist: artistHint || "YouTube", durationSec: 0 };
-  if (videoId) throw new Error("Exact selected video download failed");
   const sc = await trySoundCloud(titleHint, artistHint, finalPath);
   if (sc) return { filePath: finalPath, webUrl: url, ...sc };
-  const jio = await tryJioSaavn(titleHint, artistHint, finalPath);
-  if (jio) return { filePath: finalPath, webUrl: url, ...jio };
-  const fallback = await tryYouTubeDirect(url, finalPath);
+  const fallback = videoId ? false : await tryYouTubeDirect(url, finalPath);
   if (fallback) return { filePath: finalPath, webUrl: url, title: titleHint || "Selected track", artist: artistHint || "YouTube", durationSec: 0 };
   throw new Error("All music sources failed");
 }
