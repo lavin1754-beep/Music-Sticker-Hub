@@ -51,28 +51,19 @@ if (!TOKEN) {
   process.exit(1);
 }
 
-// Audio recognition disabled — no ACRCloud / AudD key configured.
-// Per spec Fix 3: hide the Voice/Video option when this flag is false.
 const AUDIO_RECOGNITION_ENABLED = false;
-
-const RESULTS_PER_PAGE = 20;
 
 const bot = new Bot(TOKEN);
 
-// Process each user's messages sequentially (no state races),
-// but different users are handled fully concurrently.
 bot.use(sequentialize((ctx) => ctx.from?.id.toString() ?? ""));
 
 let botUsername = "";
-
-// ----------- shared helpers -----------
 
 async function safeDeleteMessage(ctx: Context, messageId?: number): Promise<void> {
   if (!messageId || !ctx.chat) return;
   try {
     await ctx.api.deleteMessage(ctx.chat.id, messageId);
   } catch {
-    /* ignore */
   }
 }
 
@@ -97,7 +88,6 @@ async function showMusicMenu(ctx: Context, userId: number): Promise<void> {
       });
       return;
     } catch {
-      /* fallthrough */
     }
   }
   const msg = await ctx.reply(text, {
@@ -110,7 +100,6 @@ async function showMusicMenu(ctx: Context, userId: number): Promise<void> {
 async function showStickersMenu(ctx: Context, userId: number): Promise<void> {
   pushHistory(userId);
   setState(userId, { mode: "sticker", step: "menu", data: {} });
-  // Show "add to current pack" if there's an open one with room.
   const s = getState(userId);
   let currentPackName: string | undefined;
   if (s.currentPackShortName) {
@@ -130,7 +119,6 @@ async function showStickersMenu(ctx: Context, userId: number): Promise<void> {
       });
       return;
     } catch {
-      /* fallthrough */
     }
   }
   const msg = await ctx.reply(text, {
@@ -169,8 +157,6 @@ function htmlEscape(s: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
 }
-
-// ----------- /start -----------
 
 bot.command("start", async (ctx) => {
   const uid = ctx.from?.id;
@@ -228,8 +214,6 @@ bot.command("viewpacks", async (ctx) => {
   });
 });
 
-// ----------- callback queries -----------
-
 bot.callbackQuery("mode:music", async (ctx) => {
   await ctx.answerCallbackQuery();
   const uid = ctx.from.id;
@@ -262,7 +246,6 @@ bot.callbackQuery("home", async (ctx) => {
   await showHome(ctx, uid);
 });
 
-// music option selection
 bot.callbackQuery(/^music:opt:(song|artist|movie|lyrics|audio)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   const uid = ctx.from.id;
@@ -302,7 +285,7 @@ bot.callbackQuery("music:next", async (ctx) => {
   const s = getState(uid);
   const all = s.searchResults || [];
   const page = (s.searchPage ?? 0) + 1;
-  const start = page * RESULTS_PER_PAGE;
+  const start = page * 20;
   if (start >= all.length) {
     await ctx.answerCallbackQuery({ text: "No more results", show_alert: false });
     return;
@@ -320,17 +303,13 @@ bot.callbackQuery("music:prev", async (ctx) => {
   await renderResultsPage(ctx, uid);
 });
 
-// New: pick by direct videoId. Old positional `music:pick:N` callbacks (from
-// pre-restart messages) are handled below as a fallback that warns the user.
 bot.callbackQuery(/^music:p:([\w-]{6,32})$/, async (ctx) => {
   const videoId = ctx.match[1];
   const uid = ctx.from.id;
   const s = getState(uid);
   const all = s.searchResults || [];
-  // Try to find the rich SearchResult entry first (gives us nice title/channel).
   let pick = all.find((r) => r.videoId === videoId);
   if (!pick) {
-    // Old result message after a restart — synthesize a minimal pick.
     pick = {
       videoId,
       title: "Selected track",
@@ -350,12 +329,10 @@ bot.callbackQuery(/^music:pick:(\d+)$/, async (ctx) => {
   });
 });
 
-// stickers
 bot.callbackQuery("stickers:newpack", async (ctx) => {
   await ctx.answerCallbackQuery();
   const uid = ctx.from.id;
   pushHistory(uid);
-  // Starting a new pack — reset any "currently open" pack so a new one is created.
   setState(uid, {
     mode: "sticker",
     step: "await_pack_name",
@@ -414,13 +391,11 @@ bot.callbackQuery("stickers:viewpacks", async (ctx) => {
   });
 });
 
-// ----------- text router -----------
-
 bot.on("message:text", async (ctx) => {
   const uid = ctx.from?.id;
   if (!uid) return;
   const text = ctx.message.text.trim();
-  if (text.startsWith("/")) return; // commands handled elsewhere
+  if (text.startsWith("/")) return;
 
   const s = getState(uid);
 
@@ -446,11 +421,8 @@ bot.on("message:text", async (ctx) => {
     return;
   }
 
-  // No mode — quietly nudge.
   await ctx.reply("Tap /start to open the menu 👋");
 });
-
-// ----------- music: text query -> search -----------
 
 async function handleMusicQuery(
   ctx: Context,
@@ -483,35 +455,24 @@ async function handleMusicQuery(
 async function renderResultsPage(ctx: Context, uid: number): Promise<void> {
   const s = getState(uid);
   const all = s.searchResults || [];
-  const page = s.searchPage ?? 0;
-  const start = page * RESULTS_PER_PAGE;
-  const pageItems = all.slice(start, start + RESULTS_PER_PAGE);
-  if (pageItems.length === 0) {
-    await ctx.reply("No more results.");
-    return;
-  }
-  const text = formatResults(pageItems, start);
-  const hasMore = start + RESULTS_PER_PAGE < all.length;
-  const hasPrev = page > 0;
+  const start = 0;
+  const text = formatResults(all, start);
 
   if (ctx.callbackQuery && ctx.callbackQuery.message) {
     try {
       await ctx.editMessageText(text, {
         parse_mode: "HTML",
-        reply_markup: resultsMenu(pageItems, start, hasMore, hasPrev),
+        reply_markup: resultsMenu(all, start, false, false),
       });
       return;
     } catch {
-      /* fallthrough */
     }
   }
   await ctx.reply(text, {
     parse_mode: "HTML",
-    reply_markup: resultsMenu(pageItems, start, hasMore, hasPrev),
+    reply_markup: resultsMenu(all, start, false, false),
   });
 }
-
-// ----------- music: deliver audio -----------
 
 async function deliverAudio(ctx: Context, pick: SearchResult): Promise<void> {
   const status = await ctx.reply("⬇️ Fetching audio… please wait (up to 30s)");
@@ -547,8 +508,6 @@ async function deliverAudio(ctx: Context, pick: SearchResult): Promise<void> {
   }
 }
 
-// ----------- sticker: pack name -> create pack lazily -----------
-
 async function handlePackName(ctx: Context, name: string): Promise<void> {
   if (!ctx.from) return;
   const uid = ctx.from.id;
@@ -569,8 +528,6 @@ async function handlePackName(ctx: Context, name: string): Promise<void> {
     { parse_mode: "HTML" },
   );
 }
-
-// ----------- sticker: media handlers -----------
 
 async function downloadFile(ctx: Context, fileId: string): Promise<Buffer> {
   const file = await ctx.api.getFile(fileId);
@@ -635,7 +592,6 @@ bot.on(["message:photo", "message:document"], async (ctx) => {
     return;
   }
 
-  // Determine if photo or document and which kind.
   let fileId: string | null = null;
   let isVideo = false;
   let isAnimation = false;
@@ -698,7 +654,6 @@ async function processStaticSticker(
     const buf = await downloadFile(ctx, fileId);
     const webp = await imageToStickerWebp(buf);
 
-    // 1) If we already have an open static pack, just append to it.
     const existing = reuseStaticPack(uid);
     if (existing) {
       try {
@@ -718,7 +673,6 @@ async function processStaticSticker(
       }
     }
 
-    // 2) Otherwise create a NEW pack with this sticker as the first one.
     const created = await createStickerPack(ctx, uid, pendingName, webp, "static");
     if (!created) return;
     await replyWithStickerLink(ctx, uid, created);
@@ -741,7 +695,6 @@ async function processVideoSticker(
     await fs.writeFile(inputPath, buf);
     const webm = await videoToStickerWebm(inputPath);
 
-    // 1) Append to existing video pack if open.
     const existing = reuseVideoPack(uid);
     if (existing) {
       try {
@@ -761,7 +714,6 @@ async function processVideoSticker(
       }
     }
 
-    // 2) Create a new video pack.
     const created = await createStickerPack(ctx, uid, pendingName, webm, "video");
     if (!created) return;
     await replyWithStickerLink(ctx, uid, created);
@@ -780,7 +732,6 @@ async function createStickerPack(
   firstSticker: Buffer,
   kind: "static" | "video",
 ): Promise<string | null> {
-  // Try a clean name first; on collision, retry a few times with a short random suffix.
   const ext = kind === "video" ? "webm" : "webp";
   const format = kind === "video" ? "video" : "static";
   const emoji = kind === "video" ? "🎬" : "✨";
@@ -812,10 +763,8 @@ async function createStickerPack(
       } catch (err) {
         lastErr = err;
         if (isShortNameTakenError(err)) {
-          // Try the next candidate with a random suffix.
           continue;
         }
-        // Different error — bail.
         console.error(`[pack create ${kind}] failed`, err);
         await ctx.reply(
           `😕 Couldn't create the pack: ${err instanceof Error ? err.message : "unknown"}`,
@@ -844,8 +793,6 @@ async function createStickerPack(
     createdAt: Date.now(),
   });
   setCurrentPack(uid, chosen);
-  // CRITICAL: also persist into the user's *state* so subsequent media re-use
-  // this pack instead of creating a new one each time.
   setState(uid, { currentPackShortName: chosen });
   return chosen;
 }
@@ -887,8 +834,6 @@ async function replyWithStickerLink(ctx: Context, uid: number, shortName: string
   });
 }
 
-// ----------- error handler -----------
-
 bot.catch((err) => {
   const e = err.error;
   if (e instanceof GrammyError) console.error("[grammy]", e.description);
@@ -896,20 +841,13 @@ bot.catch((err) => {
   else console.error("[bot]", e);
 });
 
-// ----------- bootstrap -----------
-
 async function main(): Promise<void> {
   await loadStore();
   await initCookies();
   const me = await bot.api.getMe();
   botUsername = me.username;
   console.log(`[bot] starting as @${botUsername}`);
-
-  // Drop stale updates from previous runs.
   await bot.api.deleteWebhook({ drop_pending_updates: true });
-
-  // run() processes updates from different users CONCURRENTLY.
-  // sequentialize (registered above) ensures same-user updates stay in order.
   const handle = run(bot);
   console.log("[bot] polling started (concurrent mode)");
 
