@@ -32,34 +32,63 @@ function setCache(k: string, r: SearchResult[]): void {
   searchCache.set(k, { results: r, expiresAt: Date.now() + CACHE_TTL });
 }
 
-async function searchViaPiped(q: string, limit: number): Promise<SearchResult[]> {
-  const url = `https://piped.video/api/v1/search?q=${encodeURIComponent(q)}&type=video`;
-  const resp = await fetch(url, { headers: { Accept: "application/json" } });
-  if (!resp.ok) return [];
-  const json = await resp.json() as any;
-  const data = json.results || (Array.isArray(json) ? json : []);
-  
-  return data.slice(0, limit).flatMap((v: any) => {
-    let id = "";
-    if (v.url) {
-      const m = v.url.match(/v=([\w-]{6,32})/);
-      if (m) id = m[1];
-      else {
-        const m2 = v.url.match(/\/watch\/([\w-]{6,32})/);
-        if (m2) id = m2[1];
+function runCmd(cmd: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (c: Buffer) => (out += c));
+    child.stderr.on("data", (c: Buffer) => (err += c));
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve({ stdout: out, stderr: err });
+      else reject(new Error(`${cmd} exited ${code}: ${err.slice(0, 200)}`));
+    });
+  });
+}
+
+async function searchViaYtDlp(query: string, limit: number): Promise<SearchResult[]> {
+  console.log(`[search] using yt-dlp for: ${query}`);
+  try {
+    const args = [
+      "--no-warnings",
+      "--flat-playlist",
+      "--dump-json",
+      "--default-search", "ytsearch",
+      "-f", "best",
+      `ytsearch${limit}:${query}`,
+    ];
+    const { stdout } = await runCmd("yt-dlp", args);
+    const lines = stdout.trim().split("\n").filter((l) => l.length > 0);
+    const results: SearchResult[] = [];
+    
+    for (const line of lines) {
+      try {
+        const item = JSON.parse(line) as any;
+        const videoId = item.id || "";
+        const title = item.title || "Unknown";
+        const channel = item.uploader || "Unknown";
+        const duration = item.duration || 0;
+        
+        if (!videoId) continue;
+        
+        results.push({
+          videoId,
+          title,
+          url: `https://www.youtube.com/watch?v=${videoId}`,
+          channel,
+          durationFormatted: duration > 0 ? new Date(duration * 1000).toISOString().slice(14, 19) : "?",
+        });
+      } catch {
       }
     }
-    if (v.id && !id) id = v.id;
     
-    if (!id || !v.title) return [];
-    return [{
-      videoId: id,
-      title: v.title,
-      url: `https://www.youtube.com/watch?v=${id}`,
-      channel: v.uploaderName || "Unknown",
-      durationFormatted: v.duration ? new Date(v.duration * 1000).toISOString().slice(14, 19) : "?",
-    }];
-  });
+    console.log(`[search] yt-dlp returned ${results.length} results`);
+    return results;
+  } catch (err) {
+    console.error("[search] yt-dlp failed:", err instanceof Error ? err.message : String(err));
+    return [];
+  }
 }
 
 export async function searchMusic(
@@ -77,18 +106,21 @@ export async function searchMusic(
   }
   const key = `${kind}:${q}`;
   const cached = getCached(key);
-  if (cached) return cached;
+  if (cached) {
+    console.log(`[search] cache hit for ${key}`);
+    return cached;
+  }
   
   try {
-    const results = await searchViaPiped(q, limit);
+    const results = await searchViaYtDlp(q, Math.min(limit, 50));
     if (results.length > 0) {
       setCache(key, results);
       return results;
     }
-    console.warn(`[music search] piped returned 0 results for: ${q}`);
+    console.warn(`[search] no results for: ${q}`);
     return [];
   } catch (err) {
-    console.error("[music search] failed:", err instanceof Error ? err.message : String(err));
+    console.error("[search] failed:", err instanceof Error ? err.message : String(err));
     return [];
   }
 }
@@ -99,21 +131,6 @@ export interface DownloadedAudio {
   artist: string;
   durationSec: number;
   webUrl: string;
-}
-
-function runCmd(cmd: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
-    let out = "";
-    let err = "";
-    child.stdout.on("data", (c: Buffer) => (out += c));
-    child.stderr.on("data", (c: Buffer) => (err += c));
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code === 0) resolve({ stdout: out, stderr: err });
-      else reject(new Error(`${cmd} exited ${code}: ${err.slice(0, 400)}`));
-    });
-  });
 }
 
 async function findAndMoveMp3(outDir: string, prefix: string, finalPath: string): Promise<boolean> {
@@ -136,33 +153,38 @@ async function findAndMoveMp3(outDir: string, prefix: string, finalPath: string)
   return false;
 }
 
-async function tryYouTubeDirect(url: string, outPath: string): Promise<boolean> {
+async function tryYouTubeDirect(url: string, videoId: string, outPath: string): Promise<boolean> {
   const outDir = path.dirname(outPath);
   const prefix = path.basename(outPath, ".mp3") + "-ytd";
-  console.log(`[download] trying youtube direct for ${url}`);
+  console.log(`[download] trying youtube for ${videoId}`);
   
   for (const client of ["ios", "android", "mweb"] as const) {
     const args = [
-      "--no-warnings", "--no-playlist", "--no-progress",
-      "--socket-timeout", "15", "--retries", "1",
-      "--fragment-retries", "1",
+      "--no-warnings",
+      "--no-playlist",
+      "--no-progress",
+      "--socket-timeout", "15",
+      "--retries", "2",
+      "--fragment-retries", "2",
       "--concurrent-fragments", "5",
       "--extractor-args", `youtube:player_client=${client}`,
       "--force-ipv4",
       "-f", "bestaudio[abr<=128]/bestaudio/best",
-      "--extract-audio", "--audio-format", "mp3", "--audio-quality", "5",
+      "--extract-audio",
+      "--audio-format", "mp3",
+      "--audio-quality", "5",
       "-o", path.join(outDir, `${prefix}.%(ext)s`),
       url,
     ];
     try {
-      console.log(`[download] yt-dlp with ${client} client…`);
+      console.log(`[download] yt-dlp with ${client}…`);
       await runCmd("yt-dlp", args);
       if (await findAndMoveMp3(outDir, prefix, outPath)) {
         console.log(`[download] success with ${client}`);
         return true;
       }
     } catch (e) {
-      console.warn(`[download] ${client} failed: ${e instanceof Error ? e.message : String(e)}`);
+      console.warn(`[download] ${client} failed: ${e instanceof Error ? e.message.slice(0, 100) : String(e).slice(0, 100)}`);
     }
   }
   return false;
@@ -181,14 +203,14 @@ async function trySoundCloud(title: string, artist: string, outPath: string): Pr
       console.warn(`[download] no soundcloud result for ${q}`);
       return null;
     }
-    console.log(`[download] found soundcloud: ${line}`);
+    console.log(`[download] soundcloud url: ${line}`);
     await runCmd("yt-dlp", ["--no-warnings", "--no-progress", "--socket-timeout", "30", "--concurrent-fragments", "5", "-x", "--audio-format", "mp3", "--audio-quality", "5", "-o", path.join(outDir, `${prefix}.%(ext)s`), line]);
     if (await findAndMoveMp3(outDir, prefix, outPath)) {
       console.log(`[download] soundcloud success`);
       return { title, artist, durationSec: 0 };
     }
   } catch (e) {
-    console.warn(`[download] soundcloud failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`[download] soundcloud failed: ${e instanceof Error ? e.message.slice(0, 100) : String(e).slice(0, 100)}`);
     return null;
   }
   return null;
@@ -198,9 +220,9 @@ export async function debugSources(): Promise<string> {
   try {
     await runCmd("yt-dlp", ["--version"]);
     await runCmd("ffmpeg", ["-version"]);
-    return "yt-dlp: ✓\nffmpeg: ✓\ncookies: n/a";
+    return "yt-dlp: ✓\nffmpeg: ✓";
   } catch (e) {
-    return `yt-dlp/ffmpeg: missing\n${e instanceof Error ? e.message : String(e)}`;
+    return `error: ${e instanceof Error ? e.message.slice(0, 100) : String(e).slice(0, 100)}`;
   }
 }
 
@@ -210,29 +232,29 @@ export async function downloadAsMp3(
   artistHint = "",
   videoId = "",
 ): Promise<DownloadedAudio> {
-  console.log(`[download] starting for videoId=${videoId}, url=${url}`);
+  console.log(`[download] start videoId=${videoId} url=${url}`);
   await ensureTmp();
   const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const finalPath = path.join(TMP_DIR, `${id}.mp3`);
   const directUrl = videoId ? `https://www.youtube.com/watch?v=${videoId}` : url;
   
-  if (await tryYouTubeDirect(directUrl, finalPath)) {
-    return { filePath: finalPath, webUrl: url, title: titleHint || "Selected track", artist: artistHint || "YouTube", durationSec: 0 };
+  if (videoId && (await tryYouTubeDirect(directUrl, videoId, finalPath))) {
+    return { filePath: finalPath, webUrl: url, title: titleHint || "Track", artist: artistHint || "YouTube", durationSec: 0 };
   }
-  console.log(`[download] youtube direct failed, trying soundcloud…`);
   
+  console.log(`[download] youtube failed, trying soundcloud…`);
   const sc = await trySoundCloud(titleHint, artistHint, finalPath);
   if (sc) {
     return { filePath: finalPath, webUrl: url, ...sc };
   }
-  console.log(`[download] soundcloud failed, trying fallback…`);
   
-  const fallback = videoId ? false : await tryYouTubeDirect(url, finalPath);
+  console.log(`[download] soundcloud failed, trying youtube fallback…`);
+  const fallback = !videoId && (await tryYouTubeDirect(url, "", finalPath));
   if (fallback) {
-    return { filePath: finalPath, webUrl: url, title: titleHint || "Selected track", artist: artistHint || "YouTube", durationSec: 0 };
+    return { filePath: finalPath, webUrl: url, title: titleHint || "Track", artist: artistHint || "YouTube", durationSec: 0 };
   }
   
-  throw new Error("All music sources failed (YouTube direct, SoundCloud fallback)");
+  throw new Error("All download sources failed");
 }
 
 export async function cleanupTempFile(filePath: string): Promise<void> {

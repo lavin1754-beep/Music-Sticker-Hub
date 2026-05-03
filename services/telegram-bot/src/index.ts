@@ -800,17 +800,17 @@ bot.catch((err) => {
   if (isShuttingDown) return;
   const e = err.error;
   if (e instanceof GrammyError && e.description.includes("409")) {
-    console.warn("[bot] 409 conflict: another instance is polling. Restarting in 3s…");
+    console.warn("[bot] 409 conflict: another instance is polling. Restarting in 5s…");
     if (restartTimeout) clearTimeout(restartTimeout);
     restartTimeout = setTimeout(() => {
       if (!isShuttingDown) {
         console.log("[bot] attempting restart…");
-        main().catch((err2) => {
+        startBot().catch((err2) => {
           console.error("[bot] restart failed:", err2);
           process.exit(1);
         });
       }
-    }, 3000);
+    }, 5000);
     return;
   }
   if (e instanceof GrammyError) {
@@ -822,6 +822,41 @@ bot.catch((err) => {
   }
 });
 
+process.on("unhandledRejection", (reason) => {
+  if (isShuttingDown) return;
+  if (reason instanceof GrammyError && reason.description.includes("409")) {
+    console.warn("[bot] 409 in unhandledRejection, restarting…");
+    if (restartTimeout) clearTimeout(restartTimeout);
+    restartTimeout = setTimeout(() => {
+      if (!isShuttingDown) {
+        startBot().catch(console.error);
+      }
+    }, 5000);
+    return;
+  }
+  console.error("[unhandledRejection]", reason);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("[uncaughtException]", err);
+  if (String(err).includes("409")) {
+    console.warn("[bot] 409 in uncaughtException, restarting…");
+    if (restartTimeout) clearTimeout(restartTimeout);
+    restartTimeout = setTimeout(() => {
+      if (!isShuttingDown) {
+        startBot().catch(console.error);
+      }
+    }, 5000);
+    return;
+  }
+  process.exit(1);
+});
+
+async function startBot(): Promise<void> {
+  run(bot);
+  console.log("[bot] polling started (concurrent mode)");
+}
+
 async function main(): Promise<void> {
   await loadStore();
   await initCookies();
@@ -830,8 +865,7 @@ async function main(): Promise<void> {
   console.log(`[bot] starting as @${botUsername}`);
   await bot.api.deleteWebhook({ drop_pending_updates: true });
 
-  run(bot);
-  console.log("[bot] polling started (concurrent mode)");
+  await startBot();
 
   async function shutdown(): Promise<void> {
     isShuttingDown = true;
