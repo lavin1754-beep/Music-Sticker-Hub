@@ -32,6 +32,7 @@ import {
   downloadAsMp3,
   cleanupTempFile,
   initCookies,
+  debugSources,
 } from "./music.js";
 import {
   imageToStickerWebp,
@@ -187,6 +188,22 @@ bot.command("back", async (ctx) => {
   if (prev.mode === "music") await showMusicMenu(ctx, uid);
   else if (prev.mode === "sticker") await showStickersMenu(ctx, uid);
   else await showHome(ctx, uid);
+});
+
+bot.command("debug", async (ctx) => {
+  const uid = ctx.from?.id;
+  if (!uid) return;
+  const wait = await ctx.reply("🔍 Testing all download sources, please wait 20s…");
+  try {
+    const report = await debugSources();
+    await safeDeleteMessage(ctx, wait.message_id);
+    await ctx.reply(`<b>Download source status:</b>\n\n<pre>${htmlEscape(report)}</pre>`, {
+      parse_mode: "HTML",
+    });
+  } catch (err) {
+    await safeDeleteMessage(ctx, wait.message_id);
+    await ctx.reply(`Debug failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
 });
 
 bot.command("viewpacks", async (ctx) => {

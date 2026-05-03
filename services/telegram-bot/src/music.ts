@@ -115,17 +115,14 @@ function runCmd(cmd: string, args: string[]): Promise<{ stdout: string; stderr: 
   });
 }
 
-/** After a yt-dlp download, find the resulting .mp3 file by prefix. */
-async function findMp3(outDir: string, prefix: string, finalPath: string): Promise<boolean> {
-  // Direct hit (yt-dlp honoured the %(ext)s template)
+/** After a yt-dlp download, find the resulting .mp3 file by prefix and move to finalPath. */
+async function findAndMoveMp3(outDir: string, prefix: string, finalPath: string): Promise<boolean> {
   const expected = path.join(outDir, `${prefix}.mp3`);
   try {
     await fs.access(expected);
     if (expected !== finalPath) await fs.rename(expected, finalPath);
     return true;
   } catch { /* fall through */ }
-
-  // Scan directory for any file starting with the prefix
   const files = await fs.readdir(outDir);
   const match = files.find((f) => f.startsWith(prefix) && f.endsWith(".mp3"));
   if (match) {
@@ -136,8 +133,7 @@ async function findMp3(outDir: string, prefix: string, finalPath: string): Promi
 }
 
 // ─── Source 1: JioSaavn CDN ───────────────────────────────────────────────────
-// Licensed music CDN. Works on Railway (no cloud IP restrictions).
-// Not accessible from Replit's network (DNS blocked).
+// Licensed music CDN. Works on cloud servers (Railway). Blocked on Replit DNS.
 
 interface SaavnSong {
   name?: string;
@@ -150,6 +146,7 @@ interface SaavnSong {
 const SAAVN_APIS = [
   "https://saavn.dev/api/search/songs",
   "https://saavn.me/api/search/songs",
+  "https://jiosaavan-harsh.vercel.app/api/search/songs",
 ];
 
 async function tryJioSaavn(
@@ -163,16 +160,16 @@ async function tryJioSaavn(
   for (const base of SAAVN_APIS) {
     try {
       const resp = await fetch(`${base}?query=${q}&limit=3`, {
-        signal: AbortSignal.timeout(10_000),
+        signal: AbortSignal.timeout(8_000),
         headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
       });
       if (!resp.ok) continue;
       const text = await resp.text();
-      if (!text || text.length < 10) continue;
+      if (!text || text.length < 10 || text.startsWith("<")) continue;
       const data = JSON.parse(text) as { data?: { results?: SaavnSong[] } };
       const results = data.data?.results ?? [];
       if (results.length) { song = results[0]; break; }
-    } catch { /* try next mirror */ }
+    } catch { /* try next */ }
   }
 
   if (!song) return null;
@@ -202,15 +199,76 @@ async function tryJioSaavn(
     title: song.name || title,
     artist: song.artists?.primary?.[0]?.name || artist,
     durationSec: Number(song.duration) || 0,
-    thumbUrl:
-      song.image?.find((i) => i.quality === "500x500")?.url ?? song.image?.[0]?.url,
+    thumbUrl: song.image?.find((i) => i.quality === "500x500")?.url ?? song.image?.[0]?.url,
   };
 }
 
-// ─── Source 2: yt-dlp via ytsearch + iOS client ───────────────────────────────
-// Searches YouTube by song name and downloads using the iOS player API
-// (HLS/m3u8). CONFIRMED WORKING on Replit. iOS client uses different
-// API endpoints that are less aggressively blocked than the web client.
+// ─── Source 2: SoundCloud via yt-dlp (TWO-STEP, confirmed working) ────────────
+//
+// BUG in yt-dlp 2025.06.30: "scsearch1:" generates broken URL
+//   https://api.soundcloud.com/tracks/soundcloud%3Atracks%3A853582540  ← BROKEN
+//
+// FIX (confirmed on Replit):
+//   Step 1: scsearch + --flat-playlist --print "%(webpage_url)s"
+//           → returns real https://soundcloud.com/artist/track URL
+//   Step 2: yt-dlp "https://soundcloud.com/..." -x --audio-format mp3
+//           → downloads directly using SoundcloudIE (different extractor, works)
+//
+// SoundCloud does NOT block cloud IPs → works on Railway too.
+
+async function trySoundCloud(
+  title: string,
+  artist: string,
+  outPath: string,
+): Promise<{ title: string; artist: string; durationSec: number } | null> {
+  const q = `${stripSuffix(title)} ${artist}`.trim();
+  const outDir = path.dirname(outPath);
+  const prefix = path.basename(outPath, ".mp3") + "-sc";
+
+  // Step 1: find the real SoundCloud webpage URL via scsearch (flat mode only)
+  let trackUrl = "";
+  try {
+    const { stdout } = await runCmd("yt-dlp", [
+      "--no-warnings",
+      "--flat-playlist",
+      "--print", "%(webpage_url)s",
+      `scsearch1:${q}`,
+    ]);
+    const line = stdout.trim().split("\n")[0] ?? "";
+    if (line.startsWith("https://soundcloud.com/")) trackUrl = line;
+  } catch (err) {
+    console.error("[music] SC search:", (err as Error).message);
+    return null;
+  }
+
+  if (!trackUrl) {
+    console.error("[music] SC: no webpage_url found");
+    return null;
+  }
+
+  // Step 2: download the real SoundCloud URL (uses SoundcloudIE, not SoundcloudSearchIE)
+  try {
+    await runCmd("yt-dlp", [
+      "--no-warnings", "--no-progress",
+      "--socket-timeout", "30",
+      "--concurrent-fragments", "5",
+      "-x", "--audio-format", "mp3", "--audio-quality", "5",
+      "-o", path.join(outDir, `${prefix}.%(ext)s`),
+      trackUrl,
+    ]);
+    if (await findAndMoveMp3(outDir, prefix, outPath)) {
+      console.log("[music] ✓ SoundCloud:", trackUrl);
+      return { title, artist, durationSec: 0 };
+    }
+  } catch (err) {
+    console.error("[music] SC download:", (err as Error).message);
+  }
+  return null;
+}
+
+// ─── Source 3: YouTube via ytsearch + iOS client ──────────────────────────────
+// Confirmed working on Replit (GCP). iOS player API uses HLS which is less
+// aggressively IP-blocked than the regular web player API.
 
 async function tryYtSearch(
   title: string,
@@ -236,7 +294,7 @@ async function tryYtSearch(
 
     try {
       await runCmd("yt-dlp", args);
-      if (await findMp3(outDir, prefix, outPath)) {
+      if (await findAndMoveMp3(outDir, prefix, outPath)) {
         console.log(`[music] ✓ ytsearch(${client})`);
         return { title, artist, durationSec: 0 };
       }
@@ -247,40 +305,7 @@ async function tryYtSearch(
   return null;
 }
 
-// ─── Source 3: SoundCloud via yt-dlp ─────────────────────────────────────────
-// SoundCloud does not block cloud IPs. Works on Railway when yt-dlp
-// is a version that correctly handles scsearch (newer than 2025.06.30).
-
-async function trySoundCloud(
-  title: string,
-  artist: string,
-  outPath: string,
-): Promise<{ title: string; artist: string; durationSec: number } | null> {
-  const q = `${stripSuffix(title)} ${artist}`.trim();
-  const outDir = path.dirname(outPath);
-  const prefix = path.basename(outPath, ".mp3") + "-sc";
-
-  try {
-    await runCmd("yt-dlp", [
-      "--no-warnings", "--no-progress",
-      "--socket-timeout", "30",
-      "-x", "--audio-format", "mp3", "--audio-quality", "5",
-      "-o", path.join(outDir, `${prefix}.%(ext)s`),
-      `scsearch1:${q}`,
-    ]);
-    if (await findMp3(outDir, prefix, outPath)) {
-      console.log("[music] ✓ SoundCloud");
-      return { title, artist, durationSec: 0 };
-    }
-  } catch (err) {
-    console.error("[music] SoundCloud:", (err as Error).message);
-  }
-  return null;
-}
-
 // ─── Source 4: Direct YouTube URL via yt-dlp ─────────────────────────────────
-// Uses the YouTube URL from search results. Tries ios→android→mweb clients.
-// Works on Replit; blocked by YouTube on Railway datacenter IPs.
 
 async function tryYouTubeDirect(
   url: string,
@@ -308,7 +333,7 @@ async function tryYouTubeDirect(
 
     try {
       await runCmd("yt-dlp", args);
-      if (await findMp3(outDir, prefix, outPath)) {
+      if (await findAndMoveMp3(outDir, prefix, outPath)) {
         console.log(`[music] ✓ ytdirect(${client})`);
         return { title, artist, durationSec: 0 };
       }
@@ -317,6 +342,58 @@ async function tryYouTubeDirect(
     }
   }
   return null;
+}
+
+// ─── Debug: test all sources, return a status report ─────────────────────────
+
+export async function debugSources(): Promise<string> {
+  const lines: string[] = [];
+  const ytdlpVersion = await runCmd("yt-dlp", ["--version"]).then(r => r.stdout.trim()).catch(() => "NOT FOUND");
+  const ffmpegOk = await runCmd("ffmpeg", ["-version"]).then(() => "OK").catch(() => "NOT FOUND");
+  lines.push(`yt-dlp: ${ytdlpVersion}`);
+  lines.push(`ffmpeg: ${ffmpegOk}`);
+  lines.push(`cookies: ${cookiesReady ? "yes" : "no"}`);
+  lines.push("");
+
+  // Test JioSaavn
+  try {
+    const resp = await fetch("https://saavn.dev/api/search/songs?query=tum+hi+ho&limit=1", {
+      signal: AbortSignal.timeout(8000),
+      headers: { Accept: "application/json" },
+    });
+    const text = await resp.text();
+    const ok = resp.ok && text.length > 50 && !text.startsWith("<");
+    lines.push(`JioSaavn (saavn.dev): ${ok ? "✓ accessible" : "✗ blocked (HTTP " + resp.status + ")"}`);
+  } catch (e) {
+    lines.push(`JioSaavn (saavn.dev): ✗ ${(e as Error).message.slice(0, 60)}`);
+  }
+
+  // Test SoundCloud search step
+  try {
+    const { stdout } = await runCmd("yt-dlp", [
+      "--no-warnings", "--flat-playlist", "--print", "%(webpage_url)s",
+      "scsearch1:tum hi ho arijit",
+    ]);
+    const url = stdout.trim().split("\n")[0] ?? "";
+    lines.push(`SoundCloud search: ${url.startsWith("https://soundcloud.com/") ? "✓ found " + url : "✗ got: " + url.slice(0, 80)}`);
+  } catch (e) {
+    lines.push(`SoundCloud search: ✗ ${(e as Error).message.slice(0, 80)}`);
+  }
+
+  // Test YouTube search
+  try {
+    const { stdout } = await runCmd("yt-dlp", [
+      "--no-warnings", "--flat-playlist", "--print", "%(id)s",
+      "--extractor-args", "youtube:player_client=ios",
+      "ytsearch1:tum hi ho arijit singh",
+    ]);
+    const id = stdout.trim().split("\n")[0] ?? "";
+    lines.push(`YouTube search: ${id ? "✓ found video " + id : "✗ no result"}`);
+  } catch (e) {
+    lines.push(`YouTube search: ✗ ${(e as Error).message.slice(0, 80)}`);
+  }
+
+  return lines.join("\n");
 }
 
 // ─── Main entry ───────────────────────────────────────────────────────────────
@@ -330,7 +407,7 @@ export async function downloadAsMp3(
   const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const finalPath = path.join(TMP_DIR, `${id}.mp3`);
 
-  // 1️⃣ JioSaavn CDN — works on Railway (licensed, no IP block)
+  // 1️⃣ JioSaavn CDN — licensed, no IP block, Railway-friendly
   if (titleHint) {
     try {
       const m = await tryJioSaavn(titleHint, artistHint, finalPath);
@@ -338,7 +415,15 @@ export async function downloadAsMp3(
     } catch (e) { console.error("[music] JioSaavn:", (e as Error).message); }
   }
 
-  // 2️⃣ YouTube search via iOS client — CONFIRMED working (HLS path)
+  // 2️⃣ SoundCloud TWO-STEP — confirmed working, no cloud IP block
+  if (titleHint) {
+    try {
+      const m = await trySoundCloud(titleHint, artistHint, finalPath);
+      if (m) return { filePath: finalPath, webUrl: url, ...m };
+    } catch (e) { console.error("[music] SC:", (e as Error).message); }
+  }
+
+  // 3️⃣ YouTube search via iOS client — confirmed working on GCP/Replit
   if (titleHint) {
     try {
       const m = await tryYtSearch(titleHint, artistHint, finalPath);
@@ -346,21 +431,13 @@ export async function downloadAsMp3(
     } catch (e) { console.error("[music] ytSearch:", (e as Error).message); }
   }
 
-  // 3️⃣ SoundCloud — works on Railway with newer yt-dlp
-  if (titleHint) {
-    try {
-      const m = await trySoundCloud(titleHint, artistHint, finalPath);
-      if (m) return { filePath: finalPath, webUrl: url, ...m };
-    } catch (e) { console.error("[music] SoundCloud:", (e as Error).message); }
-  }
-
-  // 4️⃣ Direct YouTube URL — fallback for any server where YouTube isn't blocked
+  // 4️⃣ Direct YouTube URL — last resort
   {
     const m = await tryYouTubeDirect(url, finalPath, titleHint, artistHint);
     if (m) return { filePath: finalPath, webUrl: url, ...m };
   }
 
-  throw new Error("All music sources failed. Check Railway logs for details.");
+  throw new Error("All music sources failed — see Railway logs for details.");
 }
 
 export async function cleanupTempFile(filePath: string): Promise<void> {
