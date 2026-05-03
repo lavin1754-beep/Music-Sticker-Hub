@@ -55,7 +55,7 @@ if (!TOKEN) {
 // Per spec Fix 3: hide the Voice/Video option when this flag is false.
 const AUDIO_RECOGNITION_ENABLED = false;
 
-const RESULTS_PER_PAGE = 10;
+const RESULTS_PER_PAGE = 20;
 
 const bot = new Bot(TOKEN);
 
@@ -156,10 +156,11 @@ function promptForKind(kind: "song" | "artist" | "movie" | "lyrics"): string {
 function formatResults(results: SearchResult[], startIdx: number): string {
   const lines = results.map((r, i) => {
     const num = startIdx + i + 1;
-    const safeTitle = r.title.length > 64 ? r.title.slice(0, 61) + "..." : r.title;
-    return `<b>${num}.</b> ${htmlEscape(safeTitle)}\n   <i>${htmlEscape(r.channel)} • ${htmlEscape(r.durationFormatted)}</i>`;
+    const safeTitle = r.title.length > 52 ? r.title.slice(0, 49) + "…" : r.title;
+    const dur = r.durationFormatted || "?";
+    return `<b>${num}.</b> ${htmlEscape(safeTitle)} <i>[${htmlEscape(dur)}]</i>`;
   });
-  return `🎧 <b>Top results</b>\n\n${lines.join("\n\n")}\n\n<i>Tap a number to play.</i>`;
+  return `🎧 <b>Results</b>\n\n${lines.join("\n")}\n\n<i>Tap a number below to download.</i>`;
 }
 
 function htmlEscape(s: string): string {
@@ -460,7 +461,7 @@ async function handleMusicQuery(
   const uid = ctx.from.id;
   const wait = await ctx.reply("🔎 Searching…");
 
-  const results = await searchMusic(query, kind, 30);
+  const results = await searchMusic(query, kind, 50);
   await safeDeleteMessage(ctx, wait.message_id);
 
   if (results.length === 0) {
