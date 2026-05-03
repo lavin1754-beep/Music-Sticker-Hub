@@ -202,22 +202,6 @@ async function trySoundCloud(title: string, artist: string, outPath: string): Pr
   return null;
 }
 
-async function tryYtSearch(title: string, artist: string, outPath: string): Promise<{ title: string; artist: string; durationSec: number } | null> {
-  const q = `${title} ${artist}`.trim();
-  const outDir = path.dirname(outPath);
-  const prefix = path.basename(outPath, ".mp3") + "-yts";
-  for (const client of ["ios", "android", "mweb"] as const) {
-    const args = ["--no-warnings", "--no-progress", "--socket-timeout", "20", "--retries", "1", "--concurrent-fragments", "5", "--extractor-args", `youtube:player_client=${client}`, "--force-ipv4", "-x", "--audio-format", "mp3", "--audio-quality", "5", "-o", path.join(outDir, `${prefix}.%(ext)s`), `ytsearch1:${q}`];
-    if (cookiesReady) args.push("--cookies", COOKIES_FILE);
-    try {
-      await runCmd("yt-dlp", args);
-      if (await findAndMoveMp3(outDir, prefix, outPath)) return { title, artist, durationSec: 0 };
-    } catch {
-    }
-  }
-  return null;
-}
-
 export async function debugSources(): Promise<string> {
   const lines: string[] = [];
   const ytdlpVersion = await runCmd("yt-dlp", ["--version"]).then((r) => r.stdout.trim()).catch(() => "NOT FOUND");
@@ -244,8 +228,6 @@ export async function downloadAsMp3(
   if (sc) return { filePath: finalPath, webUrl: url, ...sc };
   const jio = await tryJioSaavn(titleHint, artistHint, finalPath);
   if (jio) return { filePath: finalPath, webUrl: url, ...jio };
-  const yts = await tryYtSearch(titleHint, artistHint, finalPath);
-  if (yts) return { filePath: finalPath, webUrl: url, ...yts };
   const fallback = await tryYouTubeDirect(url, finalPath);
   if (fallback) return { filePath: finalPath, webUrl: url, title: titleHint || "Selected track", artist: artistHint || "YouTube", durationSec: 0 };
   throw new Error("All music sources failed");
