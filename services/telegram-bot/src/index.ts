@@ -795,8 +795,13 @@ async function replyWithStickerLink(ctx: Context, uid: number, shortName: string
 
 bot.catch((err) => {
   const e = err.error;
-  if (e instanceof GrammyError) console.error("[grammy]", e.description);
-  else if (e instanceof HttpError) console.error("[http]", e);
+  if (e instanceof GrammyError) {
+    if (e.description.includes("409") || e.description.includes("Conflict: terminated by other getUpdates request")) {
+      console.error("[bot] another bot instance is already polling");
+      return;
+    }
+    console.error("[grammy]", e.description);
+  } else if (e instanceof HttpError) console.error("[http]", e);
   else console.error("[bot]", e);
 });
 
