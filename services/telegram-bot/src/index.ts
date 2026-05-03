@@ -55,6 +55,8 @@ if (!TOKEN) {
 const AUDIO_RECOGNITION_ENABLED = false;
 const bot = new Bot(TOKEN);
 bot.use(sequentialize((ctx) => ctx.from?.id.toString() ?? ""));
+
+
 let botUsername = "";
 
 async function safeDeleteMessage(ctx: Context, messageId?: number): Promise<void> {
@@ -865,48 +867,8 @@ async function main(): Promise<void> {
   botUsername = me.username;
   console.log(`[bot] starting as @${botUsername}`);
 
-  const port = process.env.PORT || 3000;
-  const domain = process.env.REPLIT_DEV_DOMAIN || "localhost";
-  const webhookUrl = `https://${domain}/telegram/webhook`;
-
-  const app = express();
-  app.use(express.json());
-
-  app.post("/telegram/webhook", async (req: Request, res: Response) => {
-    try {
-      const handler = webhookCallback(bot, "express");
-      await handler(req, res);
-    } catch (e) {
-      console.error("[webhook] error:", e);
-      res.status(500).json({ error: "Internal server error" });
-    }
-  });
-  app.get("/telegram/health", (_req: Request, res: Response) => {
-    res.json({ ok: true, bot: botUsername });
-  });
-
-  const server = app.listen(port, async () => {
-    console.log(`[bot] webhook server listening on port ${port}`);
-    
-    try {
-      await bot.api.setWebhook(webhookUrl);
-      console.log(`[bot] webhook set to ${webhookUrl}`);
-    } catch (err) {
-      console.error("[bot] failed to set webhook:", err);
-      process.exit(1);
-    }
-  });
-
-  async function shutdown(): Promise<void> {
-    isShuttingDown = true;
-    console.log("[bot] shutting down…");
-    server.close(() => {
-      process.exit(0);
-    });
-  }
-  
-  process.once("SIGINT", shutdown);
-  process.once("SIGTERM", shutdown);
+  console.log("[bot] starting polling...");
+  await bot.start({ allowed_updates: ["message", "callback_query"] });
 }
 
 main().catch((err) => {
