@@ -225,6 +225,7 @@ async function tryYtSearch(
     const args = [
       "--no-warnings", "--no-progress",
       "--socket-timeout", "20", "--retries", "1",
+      "--concurrent-fragments", "5",
       "--extractor-args", `youtube:player_client=${client}`,
       "--force-ipv4",
       "-x", "--audio-format", "mp3", "--audio-quality", "5",
@@ -295,6 +296,7 @@ async function tryYouTubeDirect(
       "--no-warnings", "--no-playlist", "--no-progress",
       "--socket-timeout", "15", "--retries", "1",
       "--fragment-retries", "1",
+      "--concurrent-fragments", "5",
       "--extractor-args", `youtube:player_client=${client}`,
       "--force-ipv4",
       "-f", "bestaudio[abr<=128]/bestaudio/best",

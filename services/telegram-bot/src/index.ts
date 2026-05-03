@@ -496,7 +496,7 @@ async function renderResultsPage(ctx: Context, uid: number): Promise<void> {
 // ----------- music: deliver audio -----------
 
 async function deliverAudio(ctx: Context, pick: SearchResult): Promise<void> {
-  const status = await ctx.reply("⬇️ Fetching audio… this takes ~5s");
+  const status = await ctx.reply("⬇️ Fetching audio… please wait (up to 30s)");
   let downloaded;
   try {
     downloaded = await downloadAsMp3(pick.url, pick.title, pick.channel);
@@ -505,8 +505,8 @@ async function deliverAudio(ctx: Context, pick: SearchResult): Promise<void> {
     console.error("[deliver] download failed:", msg);
     await safeDeleteMessage(ctx, status.message_id);
     await ctx.reply(
-      "😕 Couldn't download that song.\n\n" +
-      "<i>Trying a different result from the same search often works!</i>",
+      "😕 Couldn't fetch that song — all sources failed.\n\n" +
+      "<b>Try:</b>\n• Pick a different result from the list\n• Search again with a slightly different name",
       { parse_mode: "HTML" },
     );
     return;
