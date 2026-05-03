@@ -156,16 +156,16 @@ async function findAndMoveMp3(outDir: string, prefix: string, finalPath: string)
 async function tryYouTubeDirect(url: string, videoId: string, outPath: string): Promise<boolean> {
   const outDir = path.dirname(outPath);
   const prefix = path.basename(outPath, ".mp3") + "-ytd";
-  console.log(`[download] trying youtube for ${videoId} to ${outPath}`);
+  console.log(`[download] trying youtube for ${videoId}`);
   
   const args = [
     "--no-warnings",
     "--no-playlist",
-    "--socket-timeout", "20",
-    "--retries", "3",
-    "--fragment-retries", "2",
-    "--concurrent-fragments", "8",
-    "-f", "best[ext=m4a]/best[ext=webm]/best[ext=mp4]/best",
+    "--socket-timeout", "25",
+    "--retries", "5",
+    "--fragment-retries", "3",
+    "--concurrent-fragments", "10",
+    "-f", "bestaudio",
     "--extract-audio",
     "--audio-format", "mp3",
     "--audio-quality", "0",
@@ -174,18 +174,18 @@ async function tryYouTubeDirect(url: string, videoId: string, outPath: string): 
   ];
   
   try {
-    console.log(`[download] running yt-dlp ${url}…`);
+    console.log(`[download] yt-dlp downloading ${url}…`);
     await runCmd("yt-dlp", args);
-    console.log(`[download] yt-dlp completed, checking for file…`);
+    console.log(`[download] completed, moving file…`);
     const found = await findAndMoveMp3(outDir, prefix, outPath);
     if (found) {
-      console.log(`[download] success! file at ${outPath}`);
+      console.log(`[download] ✓ success`);
       return true;
     }
-    console.warn(`[download] no mp3 found at ${outPath} or ${path.join(outDir, prefix + ".mp3")}`);
+    console.warn(`[download] file not found after download`);
     return false;
   } catch (e) {
-    console.error(`[download] yt-dlp failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`[download] failed: ${e instanceof Error ? e.message : String(e)}`);
     return false;
   }
 }
