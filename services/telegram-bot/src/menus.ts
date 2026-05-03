@@ -37,14 +37,30 @@ export function musicOptionsMenu(audioRecognitionEnabled: boolean): InlineKeyboa
   return kb;
 }
 
-export function resultsMenu(results: Array<{ videoId: string }>): InlineKeyboard {
+export function resultsMenu(
+  results: Array<{ videoId: string }>,
+  page = 0,
+  pageSize = 10,
+): InlineKeyboard {
   const kb = new InlineKeyboard();
-  const total = Math.min(results.length, 100);
-  for (let i = 0; i < total; i++) {
-    kb.text(`${i + 1}`, `music:p:${results[i].videoId}`);
+  const start = page * pageSize;
+  const end = Math.min(start + pageSize, results.length);
+  const pageResults = results.slice(start, end);
+
+  for (let i = 0; i < pageResults.length; i++) {
+    kb.text(`${start + i + 1}`, `music:p:${pageResults[i].videoId}`);
     if ((i + 1) % 5 === 0) kb.row();
   }
-  if (total % 5 !== 0) kb.row();
+  if (pageResults.length % 5 !== 0) kb.row();
+
+  const totalPages = Math.ceil(results.length / pageSize);
+  if (totalPages > 1) {
+    if (page > 0) kb.text("⬅️ Prev", `music:page:${page - 1}`);
+    kb.text(`${page + 1}/${totalPages}`, "music:page:info");
+    if (page < totalPages - 1) kb.text("Next ➡️", `music:page:${page + 1}`);
+    kb.row();
+  }
+
   kb.text("🔁 New Search", "music:new").text("⬅️ Back", "back");
   kb.row().text("🏠 Main Menu", "home");
   return kb;

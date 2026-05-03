@@ -289,6 +289,17 @@ bot.callbackQuery(/^music:p:([\w-]{6,32})$/, async (ctx) => {
   await deliverAudio(ctx, pick);
 });
 
+bot.callbackQuery(/^music:page:(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const uid = ctx.from.id;
+  const page = parseInt(ctx.match[1], 10);
+  await renderResultsPage(ctx, uid, page);
+});
+
+bot.callbackQuery("music:page:info", async (ctx) => {
+  await ctx.answerCallbackQuery({ text: "Use ⬅️ and ➡️ to navigate pages" });
+});
+
 bot.callbackQuery(/^music:pick:(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery({
     text: "This result is from an old search — please run a new search.",
@@ -419,16 +430,30 @@ async function handleMusicQuery(
   await renderResultsPage(ctx, uid);
 }
 
-async function renderResultsPage(ctx: Context, uid: number): Promise<void> {
+async function renderResultsPage(ctx: Context, uid: number, page = 0): Promise<void> {
   const s = getState(uid);
   const all = s.searchResults || [];
-  const text = formatResults(all);
+  const pageSize = 10;
+  const start = page * pageSize;
+  const end = Math.min(start + pageSize, all.length);
+  const pageResults = all.slice(start, end);
+  
+  const lines = pageResults.map((r, i) => {
+    const safeTitle = r.title.length > 52 ? r.title.slice(0, 49) + "…" : r.title;
+    const dur = r.durationFormatted || "?";
+    return `<b>${start + i + 1}.</b> ${htmlEscape(safeTitle)} <i>[${htmlEscape(dur)}]</i>`;
+  });
+  const totalPages = Math.ceil(all.length / pageSize);
+  const pageInfo = totalPages > 1 ? `\n\n<i>Page ${page + 1}/${totalPages}</i>` : "";
+  const text = `🎧 <b>Results</b>\n\n${lines.join("\n")}${pageInfo}\n\n<i>Tap a number below to download.</i>`;
+
+  setState(uid, { searchPage: page });
 
   if (ctx.callbackQuery && ctx.callbackQuery.message) {
     try {
       await ctx.editMessageText(text, {
         parse_mode: "HTML",
-        reply_markup: resultsMenu(all),
+        reply_markup: resultsMenu(all, page, pageSize),
       });
       return;
     } catch {
@@ -436,7 +461,7 @@ async function renderResultsPage(ctx: Context, uid: number): Promise<void> {
   }
   await ctx.reply(text, {
     parse_mode: "HTML",
-    reply_markup: resultsMenu(all),
+    reply_markup: resultsMenu(all, page, pageSize),
   });
 }
 

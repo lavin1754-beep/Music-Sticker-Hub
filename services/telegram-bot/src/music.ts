@@ -156,38 +156,38 @@ async function findAndMoveMp3(outDir: string, prefix: string, finalPath: string)
 async function tryYouTubeDirect(url: string, videoId: string, outPath: string): Promise<boolean> {
   const outDir = path.dirname(outPath);
   const prefix = path.basename(outPath, ".mp3") + "-ytd";
-  console.log(`[download] trying youtube for ${videoId}`);
+  console.log(`[download] trying youtube for ${videoId} to ${outPath}`);
   
-  for (const client of ["ios", "android", "mweb"] as const) {
-    const args = [
-      "--no-warnings",
-      "--no-playlist",
-      "--no-progress",
-      "--socket-timeout", "15",
-      "--retries", "2",
-      "--fragment-retries", "2",
-      "--concurrent-fragments", "5",
-      "--extractor-args", `youtube:player_client=${client}`,
-      "--force-ipv4",
-      "-f", "bestaudio[abr<=128]/bestaudio/best",
-      "--extract-audio",
-      "--audio-format", "mp3",
-      "--audio-quality", "5",
-      "-o", path.join(outDir, `${prefix}.%(ext)s`),
-      url,
-    ];
-    try {
-      console.log(`[download] yt-dlp with ${client}…`);
-      await runCmd("yt-dlp", args);
-      if (await findAndMoveMp3(outDir, prefix, outPath)) {
-        console.log(`[download] success with ${client}`);
-        return true;
-      }
-    } catch (e) {
-      console.warn(`[download] ${client} failed: ${e instanceof Error ? e.message.slice(0, 100) : String(e).slice(0, 100)}`);
+  const args = [
+    "--no-warnings",
+    "--no-playlist",
+    "--socket-timeout", "20",
+    "--retries", "3",
+    "--fragment-retries", "2",
+    "--concurrent-fragments", "8",
+    "-f", "best[ext=m4a]/best[ext=webm]/best[ext=mp4]/best",
+    "--extract-audio",
+    "--audio-format", "mp3",
+    "--audio-quality", "0",
+    "-o", path.join(outDir, `${prefix}.%(ext)s`),
+    url,
+  ];
+  
+  try {
+    console.log(`[download] running yt-dlp ${url}…`);
+    await runCmd("yt-dlp", args);
+    console.log(`[download] yt-dlp completed, checking for file…`);
+    const found = await findAndMoveMp3(outDir, prefix, outPath);
+    if (found) {
+      console.log(`[download] success! file at ${outPath}`);
+      return true;
     }
+    console.warn(`[download] no mp3 found at ${outPath} or ${path.join(outDir, prefix + ".mp3")}`);
+    return false;
+  } catch (e) {
+    console.error(`[download] yt-dlp failed: ${e instanceof Error ? e.message : String(e)}`);
+    return false;
   }
-  return false;
 }
 
 async function trySoundCloud(title: string, artist: string, outPath: string): Promise<{ title: string; artist: string; durationSec: number } | null> {
