@@ -52,11 +52,8 @@ if (!TOKEN) {
 }
 
 const AUDIO_RECOGNITION_ENABLED = false;
-
 const bot = new Bot(TOKEN);
-
 bot.use(sequentialize((ctx) => ctx.from?.id.toString() ?? ""));
-
 let botUsername = "";
 
 async function safeDeleteMessage(ctx: Context, messageId?: number): Promise<void> {
@@ -141,12 +138,11 @@ function promptForKind(kind: "song" | "artist" | "movie" | "lyrics"): string {
   }
 }
 
-function formatResults(results: SearchResult[], startIdx: number): string {
+function formatResults(results: SearchResult[]): string {
   const lines = results.map((r, i) => {
-    const num = startIdx + i + 1;
     const safeTitle = r.title.length > 52 ? r.title.slice(0, 49) + "…" : r.title;
     const dur = r.durationFormatted || "?";
-    return `<b>${num}.</b> ${htmlEscape(safeTitle)} <i>[${htmlEscape(dur)}]</i>`;
+    return `<b>${i + 1}.</b> ${htmlEscape(safeTitle)} <i>[${htmlEscape(dur)}]</i>`;
   });
   return `🎧 <b>Results</b>\n\n${lines.join("\n")}\n\n<i>Tap a number below to download.</i>`;
 }
@@ -279,45 +275,19 @@ bot.callbackQuery("music:new", async (ctx) => {
   await showMusicMenu(ctx, uid);
 });
 
-bot.callbackQuery("music:next", async (ctx) => {
-  await ctx.answerCallbackQuery();
-  const uid = ctx.from.id;
-  const s = getState(uid);
-  const all = s.searchResults || [];
-  const page = (s.searchPage ?? 0) + 1;
-  const start = page * 20;
-  if (start >= all.length) {
-    await ctx.answerCallbackQuery({ text: "No more results", show_alert: false });
-    return;
-  }
-  setState(uid, { searchPage: page });
-  await renderResultsPage(ctx, uid);
-});
-
-bot.callbackQuery("music:prev", async (ctx) => {
-  await ctx.answerCallbackQuery();
-  const uid = ctx.from.id;
-  const s = getState(uid);
-  const page = Math.max(0, (s.searchPage ?? 0) - 1);
-  setState(uid, { searchPage: page });
-  await renderResultsPage(ctx, uid);
-});
-
 bot.callbackQuery(/^music:p:([\w-]{6,32})$/, async (ctx) => {
   const videoId = ctx.match[1];
   const uid = ctx.from.id;
+  setState(uid, { selectedVideoId: videoId });
   const s = getState(uid);
   const all = s.searchResults || [];
-  let pick = all.find((r) => r.videoId === videoId);
-  if (!pick) {
-    pick = {
-      videoId,
-      title: "Selected track",
-      url: `https://www.youtube.com/watch?v=${videoId}`,
-      channel: "YouTube",
-      durationFormatted: "?",
-    };
-  }
+  const pick = all.find((r) => r.videoId === videoId) ?? {
+    videoId,
+    title: "Selected track",
+    url: `https://www.youtube.com/watch?v=${videoId}`,
+    channel: "YouTube",
+    durationFormatted: "?",
+  };
   await ctx.answerCallbackQuery({ text: "🎧 Fetching audio…" });
   await deliverAudio(ctx, pick);
 });
@@ -455,14 +425,13 @@ async function handleMusicQuery(
 async function renderResultsPage(ctx: Context, uid: number): Promise<void> {
   const s = getState(uid);
   const all = s.searchResults || [];
-  const start = 0;
-  const text = formatResults(all, start);
+  const text = formatResults(all);
 
   if (ctx.callbackQuery && ctx.callbackQuery.message) {
     try {
       await ctx.editMessageText(text, {
         parse_mode: "HTML",
-        reply_markup: resultsMenu(all, start, false, false),
+        reply_markup: resultsMenu(all),
       });
       return;
     } catch {
@@ -470,7 +439,7 @@ async function renderResultsPage(ctx: Context, uid: number): Promise<void> {
   }
   await ctx.reply(text, {
     parse_mode: "HTML",
-    reply_markup: resultsMenu(all, start, false, false),
+    reply_markup: resultsMenu(all),
   });
 }
 
@@ -478,7 +447,7 @@ async function deliverAudio(ctx: Context, pick: SearchResult): Promise<void> {
   const status = await ctx.reply("⬇️ Fetching audio… please wait (up to 30s)");
   let downloaded;
   try {
-    downloaded = await downloadAsMp3(pick.url, pick.title, pick.channel);
+    downloaded = await downloadAsMp3(pick.url, pick.title, pick.channel, pick.videoId);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[deliver] download failed:", msg);

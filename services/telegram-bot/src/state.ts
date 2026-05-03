@@ -27,6 +27,7 @@ export interface UserState {
   pendingPackName?: string;
   currentPackShortName?: string;
   lastMenuMessageId?: number;
+  selectedVideoId?: string;
 }
 
 export interface PackRecord {

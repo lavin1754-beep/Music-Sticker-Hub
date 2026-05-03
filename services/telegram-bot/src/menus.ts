@@ -16,7 +16,6 @@ export function homeMenu(audioRecognitionEnabled: boolean): InlineKeyboard {
   const kb = new InlineKeyboard()
     .text("🎵 Music", "mode:music")
     .text("🧩 Stickers", "mode:sticker");
-  // audioRecognitionEnabled flag kept for potential future use (currently unused in home menu)
   void audioRecognitionEnabled;
   return kb;
 }
@@ -38,26 +37,13 @@ export function musicOptionsMenu(audioRecognitionEnabled: boolean): InlineKeyboa
   return kb;
 }
 
-export function resultsMenu(
-  results: Array<{ videoId: string }>,
-  startIdx: number,
-  hasMore: boolean,
-  hasPrev: boolean,
-): InlineKeyboard {
+export function resultsMenu(results: Array<{ videoId: string }>): InlineKeyboard {
   const kb = new InlineKeyboard();
   results.forEach((r, i) => {
-    const num = startIdx + i + 1;
-    // Encode the videoId directly so old result-message buttons keep referring
-    // to the right song even after the user starts a new search.
-    kb.text(`${num}`, `music:p:${r.videoId}`);
+    kb.text(`${i + 1}`, `music:p:${r.videoId}`);
     if ((i + 1) % 5 === 0) kb.row();
   });
   if (results.length % 5 !== 0) kb.row();
-
-  if (hasPrev) kb.text("⬅️ Prev", "music:prev");
-  if (hasMore) kb.text("➡️ Next", "music:next");
-  if (hasPrev || hasMore) kb.row();
-
   kb.text("🔁 New Search", "music:new").text("⬅️ Back", "back");
   kb.row().text("🏠 Main Menu", "home");
   return kb;
@@ -74,7 +60,6 @@ export function packFullMenu(): InlineKeyboard {
 export function stickersStartMenu(currentPackName?: string): InlineKeyboard {
   const kb = new InlineKeyboard();
   if (currentPackName) {
-    // User has an open pack — let them keep adding to it without restarting the flow.
     kb.text(`🎨 Add to "${currentPackName.slice(0, 24)}"`, "stickers:continue").row();
   }
   kb.text("✨ Start New Pack", "stickers:newpack")
