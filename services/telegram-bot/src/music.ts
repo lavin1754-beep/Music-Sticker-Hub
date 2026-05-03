@@ -1,10 +1,12 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { spawn } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import type { SearchResult } from "./state.js";
 
 const TMP_DIR = path.join(os.tmpdir(), "arya-music");
+const execFileAsync = promisify(execFile);
 
 async function ensureTmp(): Promise<void> {
   await fs.mkdir(TMP_DIR, { recursive: true });
@@ -32,80 +34,6 @@ function setCache(k: string, r: SearchResult[]): void {
   searchCache.set(k, { results: r, expiresAt: Date.now() + CACHE_TTL });
 }
 
-function runCmd(cmd: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"], timeout: 40000 });
-    let out = "";
-    let err = "";
-    
-    child.stdout.on("data", (c: Buffer) => (out += c));
-    child.stderr.on("data", (c: Buffer) => (err += c));
-    
-    const timer = setTimeout(() => {
-      child.kill();
-      reject(new Error(`${cmd} timeout`));
-    }, 40000);
-    
-    child.on("error", (e) => {
-      clearTimeout(timer);
-      reject(e);
-    });
-    
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      if (code === 0) {
-        resolve({ stdout: out, stderr: err });
-      } else {
-        reject(new Error(`${cmd} exited ${code}`));
-      }
-    });
-  });
-}
-
-async function searchViaYtDlp(query: string, limit: number): Promise<SearchResult[]> {
-  console.log(`[search] query: ${query}`);
-  try {
-    const { stdout } = await runCmd("yt-dlp", [
-      "--no-warnings",
-      "--dump-json",
-      "--no-playlist",
-      "-j",
-      `ytsearch${limit}:${query}`,
-    ]);
-    
-    const lines = stdout.trim().split("\n").filter((l) => l.length > 0);
-    const results: SearchResult[] = [];
-    
-    for (const line of lines) {
-      try {
-        const item = JSON.parse(line) as any;
-        const videoId = item.id || "";
-        const title = item.title || "Unknown";
-        const channel = item.uploader || "Unknown";
-        const duration = item.duration || 0;
-        
-        if (!videoId) continue;
-        
-        results.push({
-          videoId,
-          title,
-          url: `https://www.youtube.com/watch?v=${videoId}`,
-          channel,
-          durationFormatted: duration > 0 ? new Date(duration * 1000).toISOString().slice(14, 19) : "?",
-        });
-      } catch {
-        // skip malformed JSON
-      }
-    }
-    
-    console.log(`[search] found ${results.length} results`);
-    return results;
-  } catch (err) {
-    console.error("[search] error:", err instanceof Error ? err.message : String(err));
-    return [];
-  }
-}
-
 export async function searchMusic(
   query: string,
   kind: "song" | "artist" | "movie" | "lyrics",
@@ -124,17 +52,57 @@ export async function searchMusic(
   const cached = getCached(key);
   if (cached) return cached;
   
+  console.log(`[search] start: ${q}`);
+  
   try {
-    const results = await searchViaYtDlp(q, Math.min(limit, 50));
+    const { stdout } = await execFileAsync("yt-dlp", [
+      "--no-warnings",
+      "--dump-json",
+      "--no-playlist",
+      "-j",
+      `ytsearch${Math.min(limit, 50)}:${q}`,
+    ], { timeout: 25000, maxBuffer: 1024 * 1024 * 10 });
+    
+    const lines = stdout.trim().split("\n").filter((l) => l);
+    const results: SearchResult[] = [];
+    
+    for (const line of lines.slice(0, limit)) {
+      try {
+        const item = JSON.parse(line) as any;
+        const videoId = item.id || "";
+        const title = item.title || "";
+        const channel = item.uploader || "";
+        const duration = item.duration || 0;
+        
+        if (!videoId || !title) continue;
+        
+        results.push({
+          videoId,
+          title,
+          url: `https://www.youtube.com/watch?v=${videoId}`,
+          channel,
+          durationFormatted: duration > 0 ? formatDuration(duration) : "?",
+        });
+      } catch {
+        // skip
+      }
+    }
+    
+    console.log(`[search] found ${results.length}`);
     if (results.length > 0) {
       setCache(key, results);
-      return results;
     }
-    return [];
+    return results;
   } catch (err) {
-    console.error("[search] catch error:", err);
+    console.error(`[search] error: ${err instanceof Error ? err.message : String(err)}`);
     return [];
   }
+}
+
+function formatDuration(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
 }
 
 export interface DownloadedAudio {
@@ -143,6 +111,54 @@ export interface DownloadedAudio {
   artist: string;
   durationSec: number;
   webUrl: string;
+}
+
+export async function downloadAsMp3(
+  url: string,
+  titleHint = "",
+  artistHint = "",
+  videoId = "",
+): Promise<DownloadedAudio> {
+  console.log(`[download] start: ${videoId}`);
+  await ensureTmp();
+  
+  const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const finalPath = path.join(TMP_DIR, `${id}.mp3`);
+  const directUrl = videoId ? `https://www.youtube.com/watch?v=${videoId}` : url;
+  
+  try {
+    await execFileAsync("yt-dlp", [
+      "--no-warnings",
+      "--no-playlist",
+      "-x",
+      "--audio-format", "mp3",
+      "--audio-quality", "0",
+      "--socket-timeout", "20",
+      "--retries", "3",
+      "--fragment-retries", "3",
+      "--concurrent-fragments", "10",
+      "-o", finalPath.replace(/\.mp3$/, ""),
+      directUrl,
+    ], { timeout: 35000, maxBuffer: 10 * 1024 * 1024 });
+    
+    const exists = await fileExists(finalPath);
+    if (!exists) {
+      throw new Error("File not found after download");
+    }
+    
+    console.log(`[download] success`);
+    return {
+      filePath: finalPath,
+      webUrl: url,
+      title: titleHint || "Track",
+      artist: artistHint || "Artist",
+      durationSec: 0,
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[download] error: ${msg.slice(0, 100)}`);
+    throw new Error("Could not fetch that song. Try another result.");
+  }
 }
 
 async function fileExists(p: string): Promise<boolean> {
@@ -156,61 +172,11 @@ async function fileExists(p: string): Promise<boolean> {
 
 export async function debugSources(): Promise<string> {
   try {
-    await runCmd("yt-dlp", ["--version"]);
-    await runCmd("ffmpeg", ["-version"]);
+    await execFileAsync("yt-dlp", ["--version"], { timeout: 10000 });
+    await execFileAsync("ffmpeg", ["-version"], { timeout: 10000 });
     return "yt-dlp: ✓\nffmpeg: ✓";
   } catch (e) {
     return `error: ${e instanceof Error ? e.message : String(e)}`;
-  }
-}
-
-export async function downloadAsMp3(
-  url: string,
-  titleHint = "",
-  artistHint = "",
-  videoId = "",
-): Promise<DownloadedAudio> {
-  console.log(`[download] start: ${videoId || url}`);
-  await ensureTmp();
-  
-  const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  const finalPath = path.join(TMP_DIR, `${id}.mp3`);
-  const directUrl = videoId ? `https://www.youtube.com/watch?v=${videoId}` : url;
-  
-  const args = [
-    "--no-warnings",
-    "--no-playlist",
-    "-x",
-    "--audio-format", "mp3",
-    "--audio-quality", "0",
-    "--socket-timeout", "30",
-    "--retries", "10",
-    "--fragment-retries", "10",
-    "--concurrent-fragments", "20",
-    "-o", finalPath.replace(/\.mp3$/, ""),
-    directUrl,
-  ];
-  
-  console.log(`[download] running yt-dlp for ${videoId}`);
-  try {
-    await runCmd("yt-dlp", args);
-    
-    if (await fileExists(finalPath)) {
-      console.log(`[download] success`);
-      return {
-        filePath: finalPath,
-        webUrl: url,
-        title: titleHint || "Track",
-        artist: artistHint || "Artist",
-        durationSec: 0,
-      };
-    }
-    
-    console.error(`[download] file not created at ${finalPath}`);
-    throw new Error("Download completed but file not found");
-  } catch (err) {
-    console.error(`[download] failed: ${err instanceof Error ? err.message : String(err)}`);
-    throw new Error("Could not fetch audio - try another search result");
   }
 }
 
